@@ -1,391 +1,474 @@
+# --- p2p_registry.py ---
 import socket
 import threading
 import json
 import time
-import signal # Import signal module
-import sys   # Import sys module for sys.exit
+import sys
 
+# --- Configuration ---
 HOST = '0.0.0.0'
-REGISTRY_PORT = 9999 # Port for clients to connect to the registry
-MAX_CONNECTIONS = 10
-BUFFER_SIZE = 4096 # Increased buffer size just in case
+PORT = 9999
+BUFFER_SIZE = 4096
 
+# --- Shared State ---
 peer_lock = threading.Lock()
-# Store: { peer_id (ip:p2p_port) : {'socket': client_socket, 'addr': client_address, 'p2p_port': p2p_port, 'name': name} }
-connected_peers = {}
+# Store logged-in users: { peer_id: {'socket': s, 'addr': a, 'p2p_port': p, 'name': n, 'id': user_id, 'guest': False} }
+logged_in_peers = {}
+# Store guest users: { peer_id: {'socket': s, 'addr': a, 'p2p_port': p, 'name': n, 'guest': True} }
+guest_peers = {}
+# Store registered channels: { channel_name: {'owner_id': pid, 'owner_name': n, ...} }
+channel_lock = threading.Lock()
+registered_channels = {}
 
-# --- Graceful Shutdown Signal Handling ---
+# User database (simple example - replace with actual DB/file storage)
+user_credentials_lock = threading.Lock()
+# { user_id: {'name': name, 'password_hash': ...} } # In real app, use hashed passwords!
+# For this example, we'll just check ID and Name match if user exists
+registered_users_db = {
+    "123": {"name": "An"},
+    "456": {"name": "Duy"},
+    "789": {"name": "Khanh"}
+    # Add more pre-registered users if needed for testing
+}
+
+
 shutdown_requested = False
 
-def handle_shutdown_signal(sig, frame):
-    """Sets the shutdown flag when SIGINT or SIGTERM is received."""
-    global shutdown_requested
-    if not shutdown_requested:
-        print(f"\n[SHUTDOWN] Signal {sig} received. Initiating graceful shutdown...")
-        shutdown_requested = True
+# --- Helper Functions ---
 
-# --- Broadcast and Peer List Functions ---
+def send_message_to_peer(peer_id, message_dict):
+    """Sends a JSON message to a specific peer (guest or logged-in)."""
+    target_peer_info = None
+    with peer_lock:
+        target_peer_info = logged_in_peers.get(peer_id) or guest_peers.get(peer_id)
+
+    if target_peer_info and target_peer_info.get('socket'):
+        try:
+            msg_json = json.dumps(message_dict) + "\n"
+            target_peer_info['socket'].sendall(msg_json.encode('utf-8'))
+            # print(f"[DEBUG SEND to {peer_id}] {msg_json.strip()}") # Debugging
+            return True
+        except (socket.error, OSError) as e:
+            print(f"[ERROR] Failed to send message to {peer_id} ({target_peer_info.get('name')}): {e}")
+            # Consider marking peer for removal here if send fails repeatedly
+            return False
+    # else: print(f"[WARN] Cannot send message, peer {peer_id} not found or socket missing.")
+    return False
+
+def send_error_to_peer(peer_id, error_message):
+    """Sends a structured error message."""
+    print(f"[SEND ERROR to {peer_id}]: {error_message}")
+    send_message_to_peer(peer_id, {'type': 'error', 'message': error_message})
 
 def broadcast_update(message_dict, exclude_peer_id=None):
-    """Broadcasts updates to all peers, optionally excluding one."""
+    """Sends a message to all *logged-in* peers, optionally excluding one."""
+    # Decide if guests should receive certain broadcasts (e.g., new channels)
+    # For now, only broadcast to logged-in peers.
     with peer_lock:
-        message_json = json.dumps(message_dict) + "\n"
-        encoded_message = message_json.encode('utf-8')
-        peers_to_remove = []
-        # Use list() to avoid RuntimeError if dict changes size during iteration
-        for peer_id, peer_info in list(connected_peers.items()):
-            if peer_id == exclude_peer_id: # Skip excluded peer
-                continue
-            try:
-                if peer_info and 'socket' in peer_info and peer_info['socket']:
-                     peer_info['socket'].sendall(encoded_message)
-                else:
-                     print(f"[WARNING] Peer {peer_id} found in dict but has no valid socket during broadcast.")
-                     peers_to_remove.append(peer_id)
-            except (socket.error, BrokenPipeError, OSError) as e:
-                print(f"[WARNING] Failed to send update to {peer_info.get('name', peer_id)}: {e}. Marking for removal.")
-                peers_to_remove.append(peer_id)
+        # Create a list of peer IDs to avoid issues if dict changes during iteration
+        peer_ids = list(logged_in_peers.keys())
 
-        # Clean up peers that caused errors (outside the main sending loop)
-        cleanup_occurred = False
-        for peer_id_to_remove in peers_to_remove:
-             if peer_id_to_remove in connected_peers:
-                 peer_socket_to_close = connected_peers[peer_id_to_remove].get('socket')
-                 peer_name = connected_peers[peer_id_to_remove].get('name', peer_id_to_remove)
-                 del connected_peers[peer_id_to_remove] # Remove entry first
-                 print(f"[SERVER] Auto-removed unresponsive peer {peer_name} ({peer_id_to_remove}). Total: {len(connected_peers)}")
-                 cleanup_occurred = True
-                 if peer_socket_to_close:
-                     try:
-                         peer_socket_to_close.close()
-                     except socket.error:
-                         pass
-                 # Do NOT broadcast removal from here to avoid recursion/complex locking.
-                 # The disconnect will be handled by the client handler's finally block,
-                 # or a separate future cleanup mechanism if added.
+    for pid in peer_ids:
+        if pid != exclude_peer_id:
+            send_message_to_peer(pid, message_dict)
 
-def get_peer_list_dict():
-    """Returns a dictionary of peer IDs and their info (IP, P2P port, name)."""
+def is_guest_name_taken(name):
+    """Checks if a guest name is currently in use."""
     with peer_lock:
-        # Ensure peers have necessary info before including them
-        return {
-            peer_id: {
-                'ip': info['addr'][0],
-                'p2p_port': info['p2p_port'],
-                'name': info.get('name', 'Registering...') # Include name
-            }
-            for peer_id, info in connected_peers.items()
-            if info.get('p2p_port') is not None and info.get('name') is not None # Only include fully registered peers
-        }
-
-def is_name_taken(name_to_check):
-    """Checks if a name is already used by a connected peer."""
-    with peer_lock:
-        for peer_info in connected_peers.values():
-            if peer_info.get('name') and peer_info['name'].lower() == name_to_check.lower(): # Case-insensitive check
+        for peer_info in guest_peers.values():
+            if peer_info.get('name') == name:
                 return True
-        return False
+    return False
 
-# --- Client Handling Function (Updated for Naming) ---
+def is_logged_in_name_taken(name):
+    """Checks if a name is used by a currently logged-in user."""
+    with peer_lock:
+        for peer_info in logged_in_peers.values():
+            if peer_info.get('name') == name:
+                return True
+    return False
 
+def validate_user_login(user_id, name):
+    """
+    Checks if the login credentials are valid against the 'DB'.
+    Returns: (bool valid, str error_message or None)
+    """
+    with user_credentials_lock:
+        if user_id in registered_users_db:
+            # Simple check: ID exists and name matches stored name
+            if registered_users_db[user_id]['name'] == name:
+                return True, None # Valid login
+            else:
+                return False, f"Name '{name}' does not match ID '{user_id}'."
+        else:
+            # Allow first-time login? Or reject unknown IDs?
+            # For now, let's allow first-time registration via login command
+            # Check if the desired name is already associated with *another* ID
+            for existing_id, creds in registered_users_db.items():
+                if creds['name'] == name:
+                    return False, f"Name '{name}' is registered to a different ID."
+            # If name is free and ID is new, allow registration
+            return True, None # Treat as valid first-time login
+            # Alternatively, reject: return False, f"User ID '{user_id}' not found."
+
+
+def register_new_user(user_id, name):
+     """Adds a new user to the 'DB'. Assumes validation already passed."""
+     with user_credentials_lock:
+         if user_id not in registered_users_db:
+             registered_users_db[user_id] = {'name': name}
+             print(f"[AUTH] Registered new user in DB: ID={user_id}, Name={name}")
+             return True
+         else:
+              # Should not happen if validate_user_login is correct, but good failsafe
+              print(f"[AUTH WARN] Attempted to re-register existing user ID: {user_id}")
+              return False # Or just return True as they exist
+
+
+def get_logged_in_peers_dict():
+    """Returns a serializable dict of currently logged-in peers' info."""
+    peers_dict = {}
+    with peer_lock:
+        for pid, info in logged_in_peers.items():
+            peers_dict[pid] = {
+                'name': info.get('name'),
+                'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
+                'p2p_port': info.get('p2p_port')
+                # DO NOT include socket object
+            }
+    return peers_dict
+
+# --- Main Client Handler (Modified Registration) ---
 def handle_client(client_socket, client_address):
-    """Handles registration (including name) and cleanup for one peer."""
-    print(f"[NEW CONNECTION] Peer attempting to register from {client_address}")
-    # Initialize peer_info with None for name and p2p_port
-    peer_info = {'socket': client_socket, 'addr': client_address, 'p2p_port': None, 'name': None}
-    peer_id = None # Will be set to ip:p2p_port
-    registered_peer_name = None # Store the registered name for logging/cleanup
-    registered_peer_id = None   # Store the registered ID for logging/cleanup
+    """Handles initial login/guest, ongoing messages, and cleanup."""
+    client_ip = client_address[0]
+    client_registry_port = client_address[1]
+    print(f"[NEW CONNECTION] Connection attempt from {client_ip}:{client_registry_port}")
+
+    # peer_info will be populated after successful login/guest registration
+    peer_info = None
+    peer_id = None # Will be set on successful registration
+    registered_peer_name = None # Keep track for logging/cleanup
+    is_client_guest = None # Keep track for cleanup
+    buffer = ""
 
     try:
-        client_socket.settimeout(20.0) # Slightly longer timeout for registration steps
+        # --- NEW: INITIAL LOGIN/GUEST PHASE ---
+        # Expecting 'guest_login' or 'user_login' immediately
+        client_socket.settimeout(30.0) # Timeout for receiving the first message
+        initial_message_received = False
+        registration_success = False
 
-        # 1. Ask for registration info (implicitly asking for name and p2p port now)
-        client_socket.sendall(json.dumps({'type': 'request_p2p_port'}).encode('utf-8') + b'\n') # Still use old trigger
-
-        # 2. Receive registration data (expecting type=register, p2p_port, name)
-        buffer = ""
-        registration_complete = False
-        while not registration_complete and not shutdown_requested:
+        while not initial_message_received and not shutdown_requested:
             try:
                 data = client_socket.recv(BUFFER_SIZE)
                 if not data:
-                    print(f"[DISCONNECTED] Peer {client_address} disconnected before registering.")
-                    return # Exit thread
+                    print(f"[DISCONNECTED] {client_address} disconnected before sending login info.")
+                    return # Close connection
 
                 buffer += data.decode('utf-8')
-                while '\n' in buffer and not registration_complete: # Process one message at a time until registered
+                if '\n' in buffer:
+                    message_json, buffer = buffer.split('\n', 1)
+                    if not message_json.strip(): continue
+
+                    initial_message_received = True # Process this message, then exit loop
+
+                    try:
+                        message = json.loads(message_json)
+                        msg_type = message.get('type')
+                        received_name = message.get('name')
+                        received_ip = message.get('ip') # IP reported by client (use for info, maybe validation)
+                        received_p2p_port = message.get('p2p_port')
+                        received_id = message.get('id') # Only for 'user_login'
+
+                        print(f"[RECV LOGIN] Type: {msg_type}, Name: {received_name}, IP: {received_ip}, P2P Port: {received_p2p_port}, ID: {received_id}")
+
+                        # --- Validate Common Fields ---
+                        try:
+                            p2p_port = int(received_p2p_port); assert 1024 <= p2p_port <= 65535
+                        except:
+                            send_error_to_peer(None, f"Invalid P2P port: {received_p2p_port}"); time.sleep(0.1); return # Can't use peer_id yet
+                        clean_name = str(received_name).strip()
+                        if not clean_name or len(clean_name) > 50 or ' ' in clean_name:
+                            send_error_to_peer(None, f"Invalid name format: '{received_name}'."); time.sleep(0.1); return
+
+                        # Generate potential peer ID (might change if user logs in with existing session ID?)
+                        # Using client's reported IP/port for now, but relying on registry IP is better.
+                        # Let's use client's *registry* connection info as a unique temporary ID first
+                        temp_peer_id = f"{client_ip}:{client_registry_port}" # Use connection source as temporary ID before registration
+
+                        # --- Handle Guest Login ---
+                        if msg_type == 'guest_login':
+                            if is_guest_name_taken(clean_name) or is_logged_in_name_taken(clean_name):
+                                send_error_to_peer(temp_peer_id, f"Name '{clean_name}' is currently in use.")
+                                time.sleep(0.1); return
+
+                            # Guest registration successful
+                            peer_id = f"guest_{client_ip}:{p2p_port}" # Generate a guest-specific ID
+                            is_client_guest = True
+                            peer_info = {
+                                'socket': client_socket, 'addr': client_address,
+                                'p2p_port': p2p_port, 'name': clean_name,
+                                'guest': True
+                            }
+                            with peer_lock:
+                                guest_peers[peer_id] = peer_info
+                            registered_peer_name = clean_name
+                            registration_success = True
+                            print(f"[REGISTERED GUEST] '{clean_name}' ({peer_id}) from {client_address}.")
+
+                            # Send Ack
+                            ack_msg = {'type': 'guest_ack', 'message': f"Registered as Guest '{clean_name}'.", 'client_ip': client_ip}
+                            send_message_to_peer(peer_id, ack_msg)
+
+                        # --- Handle User Login ---
+                        elif msg_type == 'user_login':
+                             if not received_id or not str(received_id).isdigit():
+                                 send_error_to_peer(temp_peer_id, "User login requires a numeric ID."); time.sleep(0.1); return
+
+                             user_id = str(received_id)
+
+                             # Check if name is used by *another* logged-in user
+                             with peer_lock:
+                                 for pid, info in logged_in_peers.items():
+                                      if info.get('name') == clean_name and info.get('id') != user_id:
+                                          send_error_to_peer(temp_peer_id, f"Name '{clean_name}' is in use by another logged-in user."); time.sleep(0.1); return
+                                      # Check if ID is used by *another* logged-in user (duplicate login attempt?)
+                                      if info.get('id') == user_id and info.get('socket') != client_socket:
+                                          # Handle duplicate login - e.g., disconnect old session? Deny new?
+                                          send_error_to_peer(temp_peer_id, f"User ID '{user_id}' is already logged in. Disconnect other session first."); time.sleep(0.1); return
+
+                             # Check against "DB"
+                             valid_creds, error_msg = validate_user_login(user_id, clean_name)
+                             print('Else')
+                             if not valid_creds:
+                                  send_error_to_peer(temp_peer_id, f"Login failed: {error_msg}"); time.sleep(0.1); return
+
+                             # --- Login Success ---
+                             # Register new user in DB if they didn't exist (first login)
+                             with user_credentials_lock:
+                                 if user_id not in registered_users_db:
+                                     register_new_user(user_id, clean_name)
+
+                             peer_id = f"user_{client_ip}:{p2p_port}" # Generate user-specific ID
+                             is_client_guest = False
+                             peer_info = {
+                                 'socket': client_socket, 'addr': client_address,
+                                 'p2p_port': p2p_port, 'name': clean_name,
+                                 'id': user_id, # Store the validated user ID
+                                 'guest': False
+                             }
+                             with peer_lock:
+                                 logged_in_peers[peer_id] = peer_info
+                             registered_peer_name = clean_name
+                             registration_success = True
+                             print(f"[REGISTERED USER] '{clean_name}' (ID: {user_id}, PeerID: {peer_id}) from {client_address}.")
+
+                             # Send Ack
+                             ack_msg = {'type': 'login_ack', 'message': f"Logged in as User '{clean_name}'.", 'client_ip': client_ip}
+                             send_message_to_peer(peer_id, ack_msg)
+
+                             # Send Peer List (only to logged-in users)
+                             current_peers_dict = get_logged_in_peers_dict()
+                             peers_for_client = {pid: pinfo for pid, pinfo in current_peers_dict.items() if pid != peer_id} # Exclude self
+                             send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
+
+                             # Broadcast Join (only for logged-in users)
+                             join_info = {'ip': client_ip, 'p2p_port': p2p_port, 'name': clean_name} # Add user_id? maybe not needed publicly
+                             broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
+
+                        # --- Unknown Login Type ---
+                        else:
+                             send_error_to_peer(temp_peer_id, f"Unknown login type: {msg_type}"); time.sleep(0.1); return
+
+                    except json.JSONDecodeError: print(f"[ERROR] Invalid JSON during login from {client_address}. Disconnecting."); return
+                    except (socket.error, OSError) as e: print(f"[ERROR] Socket error during login processing: {e}"); return
+                    except Exception as e: print(f"[ERROR] Unexpected error processing login: {e}. Disconnecting."); return
+
+                # If buffer doesn't contain newline yet, continue receiving in the while loop
+                else:
+                     pass # Continue loop to wait for more data
+
+
+            except socket.timeout:
+                 print(f"[TIMEOUT] Peer {client_address} timed out waiting for login info."); return
+            except (socket.error, ConnectionResetError, BrokenPipeError) as e:
+                 print(f"[ERROR] Socket error receiving login info: {e}. Disconnecting."); return
+            except UnicodeDecodeError:
+                 print(f"[ERROR] Non-UTF8 data during login from {client_address}. Disconnecting."); return
+
+        # --- Check if Registration Succeeded ---
+        if not registration_success:
+            print(f"[INFO] Registration failed or not completed for {client_address}.")
+            return # Exit handler thread
+
+        # --- POST-REGISTRATION MESSAGE HANDLING PHASE ---
+        print(f"[INFO] Peer '{registered_peer_name}' ({peer_id}) now in message handling phase.")
+        client_socket.settimeout(None) # Disable timeout for ongoing comms
+        buffer = "" # Reset buffer
+
+        while not shutdown_requested:
+            try:
+                data = client_socket.recv(BUFFER_SIZE)
+                if not data:
+                    print(f"[DISCONNECTED] Peer '{registered_peer_name}' ({peer_id}) disconnected gracefully.")
+                    break # Exit message loop
+
+                buffer += data.decode('utf-8')
+                while '\n' in buffer:
                     message_json, buffer = buffer.split('\n', 1)
                     if not message_json.strip(): continue
 
                     try:
                         message = json.loads(message_json)
                         msg_type = message.get('type')
-                        received_p2p_port = message.get('p2p_port')
-                        received_name = message.get('name')
 
-                        if msg_type == 'register' and received_p2p_port is not None and received_name:
-                            # --- Validation ---
-                            try:
-                                p2p_port = int(received_p2p_port)
-                                if not (0 < p2p_port < 65536):
-                                    raise ValueError("Port out of range")
-                            except (ValueError, TypeError):
-                                print(f"[ERROR] Invalid P2P port '{received_p2p_port}' from {client_address}. Disconnecting.")
-                                client_socket.sendall(json.dumps({'type': 'error', 'message': 'Invalid P2P port number'}).encode('utf-8') + b'\n')
-                                return
+                        # --- Handle 'create_channel' Request ---
+                        if msg_type == 'create_channel':
+                            # Add check: maybe only logged-in users can create channels?
+                            if is_client_guest:
+                                send_error_to_peer(peer_id, "Guests cannot create channels.")
+                                continue
 
-                            clean_name = str(received_name).strip()
-                            if not clean_name or len(clean_name) > 50: # Basic validation
-                                print(f"[ERROR] Invalid name '{received_name}' from {client_address}. Disconnecting.")
-                                client_socket.sendall(json.dumps({'type': 'error', 'message': 'Invalid name (empty or too long)'}).encode('utf-8') + b'\n')
-                                return
+                            channel_name = message.get('channel_name')
+                            owner_name_from_msg = message.get('owner_name')
+                            # Validation... (same as your previous code, but use peer_id)
+                            if not channel_name or not owner_name_from_msg: send_error_to_peer(peer_id, "Invalid create_channel format."); continue
+                            if owner_name_from_msg != registered_peer_name: send_error_to_peer(peer_id, "Permission denied: owner mismatch."); continue
+                            clean_channel_name = str(channel_name).strip();
+                            if not clean_channel_name or len(clean_channel_name) > 50 or ' ' in clean_channel_name: send_error_to_peer(peer_id, f"Invalid channel name."); continue
 
-                            # --- Check Name Uniqueness ---
-                            if is_name_taken(clean_name):
-                                print(f"[REJECTED] Name '{clean_name}' from {client_address} is already taken.")
-                                client_socket.sendall(json.dumps({'type': 'error', 'message': f"Name '{clean_name}' is already taken."}).encode('utf-8') + b'\n')
-                                return # Disconnect client
+                            # Channel creation logic... (same as your previous code)
+                            channel_created_successfully = False
+                            with channel_lock:
+                                if clean_channel_name in registered_channels: send_error_to_peer(peer_id, f"Channel name '{clean_channel_name}' taken.")
+                                else:
+                                    new_channel_info = {'owner_id': peer_id, 'owner_name': registered_peer_name, 'owner_ip': client_ip, 'owner_p2p_port': peer_info['p2p_port'], 'created_at': time.time()}
+                                    registered_channels[clean_channel_name] = new_channel_info
+                                    channel_created_successfully = True
+                                    print(f"[REGISTRY] Registered channel '{clean_channel_name}' by {registered_peer_name}.")
 
-                            # --- Registration Success ---
-                            peer_id = f"{client_address[0]}:{p2p_port}"
-                            peer_info['p2p_port'] = p2p_port
-                            peer_info['name'] = clean_name # Store the validated name
-                            registered_peer_name = clean_name # Keep for finally block
-                            registered_peer_id = peer_id    # Keep for finally block
+                            if channel_created_successfully:
+                                 send_message_to_peer(peer_id, {'type': 'channel_created','channel_name': clean_channel_name,'owner_name': registered_peer_name})
+                                 # Broadcast to logged-in users only? Or guests too? Let's do logged-in for now.
+                                 broadcast_update({'type': 'new_channel_available','channel_name': clean_channel_name,'owner_name': registered_peer_name,'owner_ip': client_ip,'owner_p2p_port': peer_info['p2p_port']}, exclude_peer_id=peer_id)
 
-                            print(f"[REGISTERED] Peer '{clean_name}' ({peer_id}) registered (P2P port: {p2p_port}).")
+                        # --- Handle 'request_channel_list' Request ---
+                        elif msg_type == 'request_channel_list':
+                            print(f"[REQUEST] Peer '{registered_peer_name}' requested channel list.")
+                            channels_payload = {}
+                            with channel_lock:
+                                 channels_payload = { name: {'owner_name': info.get('owner_name', 'N/A'), 'owner_ip': info.get('owner_ip', 'N/A'), 'owner_p2p_port': info.get('owner_p2p_port', 'N/A')} for name, info in registered_channels.items()}
+                            send_message_to_peer(peer_id, {'type': 'channel_list', 'channels': channels_payload})
 
-                            # Add to shared dict under lock
-                            with peer_lock:
-                                # Handle potential rapid reconnect/overwrite
-                                if peer_id in connected_peers:
-                                     print(f"[WARNING] Peer ID {peer_id} already exists (possibly old connection). Overwriting.")
-                                     try:
-                                         old_sock = connected_peers[peer_id].get('socket')
-                                         if old_sock and old_sock != client_socket:
-                                             old_sock.close()
-                                     except socket.error: pass
-                                connected_peers[peer_id] = peer_info
-                                print(f"[SERVER] Total registered peers: {len(connected_peers)}")
-
-                            # Send current peer list (including names) to the new peer
-                            current_peers = get_peer_list_dict()
-                            # Filter out self before sending
-                            peers_for_client = {pid: pinfo for pid, pinfo in current_peers.items() if pid != peer_id}
-                            client_socket.sendall(json.dumps({'type': 'peer_list', 'peers': peers_for_client}).encode('utf-8') + b'\n')
-
-                            # Notify all *other* peers about the join
-                            join_info = {'ip': client_address[0], 'p2p_port': p2p_port, 'name': clean_name}
-                            broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
-
-                            registration_complete = True # Exit registration loops
-                            # break # Exit inner while '\n' in buffer loop automatically due to outer loop condition
-
+                        # --- Handle other message types ---
+                        # Add handlers for /join, /leave, /ch_msg etc. later
                         else:
-                             # Received something other than a valid register message
-                             print(f"[WARNING] Received unexpected/incomplete data from {client_address} during registration: {message_json}")
-                             # Optionally send an error back
+                            print(f"[WARNING] Unknown message type '{msg_type}' from '{registered_peer_name}' ({peer_id}): {message_json}")
 
-                    except json.JSONDecodeError:
-                         print(f"[ERROR] Invalid JSON during registration from {client_address}: {message_json}")
-                         return
-                    except socket.error as e:
-                         print(f"[ERROR] Socket error during registration processing for {client_address}: {e}")
-                         return
-                    except Exception as e:
-                        print(f"[ERROR] Unexpected error processing registration message from {client_address}: {e}")
-                        return
+                    except json.JSONDecodeError: print(f"[ERROR] Invalid JSON from '{registered_peer_name}': {message_json}")
+                    except UnicodeDecodeError: print(f"[ERROR] Corrupted UTF-8 from '{registered_peer_name}'."); buffer = "" # Clear buffer on decode error
+                    except (socket.error, OSError) as send_err: print(f"[ERROR] Socket error processing '{registered_peer_name}': {send_err}"); raise send_err # Raise to outer handler
+                    except Exception as e: print(f"[ERROR] Processing message from '{registered_peer_name}': {e} - Msg: {message_json}")
 
-            except socket.timeout:
-                if not registration_complete: # Only log timeout if registration didn't finish
-                    print(f"[TIMEOUT] Peer {client_address} timed out during registration.")
-                return # Exit thread
-            except (socket.error, ConnectionResetError, BrokenPipeError) as e:
-                 print(f"[ERROR] Socket error receiving registration data for {client_address}: {e}")
-                 return
-            except UnicodeDecodeError:
-                 print(f"[ERROR] Received non-UTF8 data from {client_address} during registration. Disconnecting.")
-                 return
+            # --- Handle disconnections and errors in the message loop ---
+            except (ConnectionResetError, BrokenPipeError, socket.error, OSError) as e:
+                if not shutdown_requested: print(f"[DISCONNECTED] Peer '{registered_peer_name}' ({peer_id}) connection error: {e}"); break
+            except UnicodeDecodeError: print(f"[ERROR] Non-UTF8 stream from '{registered_peer_name}'. Closing."); break
+            except Exception as e:
+                if not shutdown_requested: print(f"[ERROR] Unexpected error handling '{registered_peer_name}': {e}"); break
 
-        # End of registration loop
-
-        if not registration_complete and not shutdown_requested:
-             print(f"[WARNING] Peer {client_address} failed to complete registration properly.")
-             return
-
-        # --- Keep-alive Phase ---
-        if registration_complete:
-             client_socket.settimeout(None) # Disable timeout for normal operation
-
-             while not shutdown_requested:
-                 try:
-                     # Check connection health by peeking. Recv(1) with MSG_PEEK is non-blocking if data available,
-                     # blocks otherwise, and raises error on disconnect.
-                     data = client_socket.recv(1, socket.MSG_PEEK)
-                     if not data:
-                         print(f"[DISCONNECTED] Peer '{registered_peer_name}' ({registered_peer_id}) disconnected gracefully.")
-                         break
-                     time.sleep(10) # Reduce frequency of checks
-                 except (socket.timeout, InterruptedError):
-                     continue # Ignore timeouts/interrupts, check shutdown_requested
-                 except (ConnectionResetError, BrokenPipeError, socket.error) as e:
-                     print(f"[DISCONNECTED] Peer '{registered_peer_name}' ({registered_peer_id}) connection error: {e}")
-                     break
-                 except Exception as e:
-                     print(f"[ERROR] Unexpected error during keep-alive for '{registered_peer_name}' ({registered_peer_id}): {e}")
-                     break
-
-    # --- Exception handling for the whole client interaction ---
-    except (ConnectionResetError, BrokenPipeError):
-        # Use registered name/id if available, otherwise fall back to address
-        peer_desc = f"'{registered_peer_name}' ({registered_peer_id})" if registered_peer_name else client_address
-        print(f"[DISCONNECTED] Peer {peer_desc} connection reset/broken.")
-    except socket.timeout:
-         # This timeout is now specific to the initial registration phase
-         peer_desc = f"'{registered_peer_name}' ({registered_peer_id})" if registered_peer_name else client_address
-         print(f"[TIMEOUT] Peer {peer_desc} timed out.") # Could happen if timeout set before None
-    except socket.error as e:
-        peer_desc = f"'{registered_peer_name}' ({registered_peer_id})" if registered_peer_name else client_address
-        print(f"[ERROR] Socket error with {peer_desc}: {e}")
+    # --- Broad Exception Handling for the whole function ---
     except Exception as e:
-        peer_desc = f"'{registered_peer_name}' ({registered_peer_id})" if registered_peer_name else client_address
-        print(f"[ERROR] Unhandled error in handle_client for {peer_desc}: {e}")
+        if not shutdown_requested:
+            peer_desc = f"'{registered_peer_name}' ({peer_id})" if registered_peer_name else f"{client_ip}:{client_registry_port}"
+            print(f"[CRITICAL ERROR] Unhandled exception in handle_client for {peer_desc}: {e}"); import traceback; traceback.print_exc()
 
+    # --- CLEANUP PHASE ---
     finally:
-        # --- Cleanup ---
-        removed = False
-        peer_left_id = registered_peer_id # Use the stored ID
-        peer_left_name = registered_peer_name # Use the stored name
+        peer_desc = f"'{registered_peer_name}' ({peer_id})" if registered_peer_name else f"{client_ip}:{client_registry_port} (Unregistered)"
+        print(f"[CLEANUP] Closing connection for {peer_desc}.")
 
-        if peer_left_id and peer_left_name: # Only cleanup/broadcast if registration was successful
+        removed_from_registry = False
+        broadcast_leave = False
+
+        if peer_id: # Only modify registry if peer was successfully registered
             with peer_lock:
-                if peer_left_id in connected_peers:
-                    # Check if the socket matches in case of overwrite scenarios
-                    if connected_peers[peer_left_id]['socket'] == client_socket:
-                         del connected_peers[peer_left_id]
-                         removed = True
-                         print(f"[REMOVED] Peer '{peer_left_name}' ({peer_left_id}) removed. Total registered peers: {len(connected_peers)}")
-                    else:
-                         # Socket doesn't match, means this entry was overwritten. Don't broadcast leave.
-                          print(f"[INFO] Socket for {peer_left_name} ({peer_left_id}) closed, but registry entry was already overwritten.")
-                else:
-                     # Peer ID/Name existed but already removed (e.g., by broadcast error cleanup)
-                     print(f"[INFO] Peer '{peer_left_name}' ({peer_left_id}) already removed from registry during final cleanup.")
+                # Remove from the correct dictionary
+                if is_client_guest:
+                    if peer_id in guest_peers and guest_peers[peer_id]['socket'] == client_socket:
+                        del guest_peers[peer_id]
+                        removed_from_registry = True
+                        print(f"[REMOVED GUEST] {peer_desc}. Guests remaining: {len(guest_peers)}")
+                else: # Logged-in user
+                    if peer_id in logged_in_peers and logged_in_peers[peer_id]['socket'] == client_socket:
+                        del logged_in_peers[peer_id]
+                        removed_from_registry = True
+                        broadcast_leave = True # Only broadcast leaves for logged-in users
+                        print(f"[REMOVED USER] {peer_desc}. Logged-in peers remaining: {len(logged_in_peers)}")
+
+            # Clean up channels owned by this user (if they were logged in)
+            # Check if this user owned any channels and remove them or mark as orphaned?
+            # Simpler: Channels persist for now even if owner leaves. Re-login can reclaim? Or manual cleanup.
+            # More complex: Transfer ownership? Delete channels?
+            # For now: Channels remain.
+            # if removed_from_registry and not is_client_guest:
+            #    handle_channel_owner_disconnect(peer_id)
+
         else:
-             # Never fully registered
-             print(f"[CLEANUP] Unregistered peer {client_address} connection closed.")
+            print(f"[CLEANUP] Unregistered peer {client_address} connection closed.")
 
-        # Close the socket outside the lock
-        try:
-            client_socket.shutdown(socket.SHUT_RDWR) # Signal close intention
-        except (socket.error, OSError):
-            pass # Ignore if already closed/invalid
-        try:
-            client_socket.close()
-        except (socket.error, OSError):
-            pass # Ignore errors closing socket
+        # Close socket robustly
+        if client_socket:
+            try: client_socket.shutdown(socket.SHUT_RDWR)
+            except: pass
+            try: client_socket.close()
+            except: pass
 
-        # Broadcast leave update *after* lock is released and socket is closed
-        # Only broadcast if removed successfully from the primary dictionary
-        if removed and peer_left_id:
-            # Broadcast requires ID. Name is useful for clients but not strictly needed in the message here.
-            broadcast_update({'type': 'peer_left', 'id': peer_left_id})
+        # Broadcast leave *only* for logged-in users removed by this thread
+        if broadcast_leave and removed_from_registry and peer_id and not shutdown_requested:
+            print(f"[BROADCAST] Notifying logged-in peers about {registered_peer_name} leaving.")
+            # Send to other logged-in users
+            broadcast_update({'type': 'peer_left', 'id': peer_id, 'name': registered_peer_name}, exclude_peer_id=peer_id)
+
+        print(f"[CLEANUP] Thread finished for {peer_desc}.")
 
 
-# --- Main Server Function (Updated for Shutdown) ---
+# --- Main Server Loop (Mostly unchanged) ---
 def start_registry_server():
     global shutdown_requested
-
-    try:
-        signal.signal(signal.SIGINT, handle_shutdown_signal)
-        signal.signal(signal.SIGTERM, handle_shutdown_signal)
-    except ValueError:
-        print("[WARNING] Cannot set signal handlers (e.g., not main thread).")
-
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.settimeout(1.0) # Check for shutdown flag periodically
-
-    print("[STARTING] P2P Registry Server is starting...")
-
     try:
-        server_socket.bind((HOST, REGISTRY_PORT))
-        print(f"[LISTENING] Registry listening on {HOST}:{REGISTRY_PORT}")
-        server_socket.listen(MAX_CONNECTIONS)
+        server_socket.bind((HOST, PORT))
+        server_socket.listen(10)
+        print(f"[SERVER START] Registry server listening on {HOST}:{PORT}")
+        server_socket.settimeout(1.0) # Timeout for accept
 
         while not shutdown_requested:
             try:
                 client_socket, client_address = server_socket.accept()
-                # Timeout inherited initially, will be changed by handler
-
-                client_thread = threading.Thread(
-                    target=handle_client,
-                    args=(client_socket, client_address),
-                    daemon=True
-                )
-                client_thread.start()
-
+                # Start a new thread for each client
+                thread = threading.Thread(target=handle_client, args=(client_socket, client_address), daemon=True)
+                thread.start()
             except socket.timeout:
-                continue # Normal condition to check shutdown_requested
-            except OSError as e:
-                 if shutdown_requested:
-                      print("[INFO] Server socket closed during shutdown.")
-                      break
-                 else:
-                      print(f"[ERROR] Error accepting connection (OS Error): {e}")
-                      time.sleep(1)
-            except Exception as e:
-                if not shutdown_requested:
-                    print(f"[ERROR] Unexpected error accepting connection: {e}")
-                time.sleep(1)
+                continue # Just check shutdown_requested flag again
+            except OSError as e: # Handle socket closed during accept
+                 if not shutdown_requested: print(f"[SERVER ERROR] Accept error: {e}")
+                 break # Exit loop if socket is closed unexpectedly
 
-    except Exception as e:
-        if not shutdown_requested:
-            print(f"[ERROR] Server encountered a fatal error: {e}")
-            shutdown_requested = True # Trigger shutdown process
-
+    except OSError as e: print(f"[SERVER CRITICAL] Cannot bind to {HOST}:{PORT}: {e}")
+    except KeyboardInterrupt: print("\n[SERVER STOP] Shutdown requested via KeyboardInterrupt.")
     finally:
-        # --- Server Shutdown Cleanup ---
-        print("[CLEANUP] Server shutdown sequence initiated.")
-        print("[CLEANUP] Closing listening socket...")
+        shutdown_requested = True
+        print("[SERVER SHUTDOWN] Closing server socket...")
         server_socket.close()
-
-        print("[CLEANUP] Notifying and closing remaining peer connections...")
-        with peer_lock:
-            # Copy items for safe iteration while clearing
-            peers_to_notify = list(connected_peers.items())
-            connected_peers.clear() # Clear the main list
-
-        # Notify peers outside the lock
-        shutdown_message = json.dumps({'type': 'server_shutdown', 'message': 'Server is shutting down.'}) + "\n"
-        encoded_shutdown_message = shutdown_message.encode('utf-8')
-        closed_count = 0
-
-        for peer_id, peer_info in peers_to_notify:
-             sock = peer_info.get('socket')
-             peer_name = peer_info.get('name', peer_id) # Use name in log
-             if sock:
-                 print(f"[CLEANUP] Closing connection to {peer_name} ({peer_id})...")
-                 try:
-                     sock.settimeout(0.5) # Short timeout for sending notification
-                     sock.sendall(encoded_shutdown_message)
-                     # time.sleep(0.05) # Short delay
-                     sock.shutdown(socket.SHUT_RDWR)
-                 except (socket.error, OSError):
-                     # print(f"[CLEANUP] Error notifying peer {peer_name} (might be already closed).")
-                     pass # Ignore errors during shutdown notification
-                 finally:
-                     try:
-                         sock.close()
-                         closed_count += 1
-                     except (socket.error, OSError):
-                         pass # Ignore errors closing socket
-
-        print(f"[STOPPED] Server has stopped. {closed_count} active connection(s) closed.")
+        # Wait briefly for client handler threads to notice shutdown_requested?
+        print("[SERVER SHUTDOWN] Notifying connected peers...")
+        # Implement logic to send a 'server_shutdown' message if desired
+        # ...
+        print("[SERVER SHUTDOWN] Server stopped.")
 
 # --- Entry Point ---
 if __name__ == "__main__":
     start_registry_server()
-    print("[EXIT] Main thread exiting.")
-    sys.exit(0) # Ensure clean exit code
