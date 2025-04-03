@@ -1,0 +1,22 @@
+{
+    "users": [
+        {
+            "userid": 1,
+            "username": "alice",
+            "password": "aliceHashedPassword", 
+            "login_status": false
+        },
+        {
+            "userid": 2,
+            "username": "bob",
+            "password": "bobHashedPassword", 
+            "login_status": false
+        },
+        {
+            "userid": 101,
+            "username": "guest",
+            "password": "guestHashedPassword", 
+            "login_status": false
+        }
+    ]
+}

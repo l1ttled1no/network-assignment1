@@ -8,7 +8,7 @@ import json
 import random
 import ipaddress
 from queue import Queue, Empty # For thread-safe communication
-
+import os
 # --- Configuration (Same as your original client) ---
 REGISTRY_HOST = '127.0.0.1'
 REGISTRY_PORT = 9999
@@ -21,7 +21,8 @@ class P2PClientGUI:
         self.root = root
         self.root.title("P2P Chat Client")
         self.root.geometry("750x550") # Adjusted size
-
+        self.user_id = None # Placeholder for user ID (if needed)
+        self.user_name = None
         # --- Core Client State (from your original code) ---
         self.peer_list_lock = threading.Lock()
         self.known_peers = {} # { peer_id: {'ip': ip, 'p2p_port': port, 'name': name} }
@@ -58,20 +59,110 @@ class P2PClientGUI:
         # --- Handle Window Closing ---
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-    def get_username(self):
-        while not self.MY_NAME:
-            name = simpledialog.askstring("Username", "Enter your desired name:", parent=self.root)
-            if name is None: # User cancelled
-                break
-            name = name.strip()
-            # Basic validation (add more rules if needed)
-            if name and ' ' not in name and len(name) <= 50:
-                self.MY_NAME = name
-            elif name:
-                messagebox.showwarning("Invalid Name", "Name cannot contain spaces and must be 50 chars or less.", parent=self.root)
-            else:
-                 messagebox.showwarning("Invalid Name", "Name cannot be empty.", parent=self.root)
+    # def get_username(self):
+    #     db_path = os.path.join("shitdb", "db.json")  # Path to the database file
+    #     try:
+    #         with open(db_path, "r") as db_file:
+    #             db_data = json.load(db_file)  # Load the database
+    #     except FileNotFoundError:
+    #         messagebox.showerror("Database Error", "User database not found.", parent=self.root)
+    #         return
+    #     except json.JSONDecodeError:
+    #         messagebox.showerror("Database Error", "Invalid database format.", parent=self.root)
+    #         return
 
+    #     while not self.MY_NAME:
+    #         name = simpledialog.askstring("Username", "Enter your desired name:", parent=self.root)
+    #         password = simpledialog.askstring("Password", "Enter your password:", show='*', parent=self.root)
+    #         if name is None or password is None:  # User cancelled
+    #             break
+    #         name = name.strip()
+
+    #         # Validate credentials
+    #         user_found = False
+    #         for user in db_data.get("users", []):
+    #             if user["username"] == name and user["password"] == password:
+    #                 self.MY_NAME = name
+    #                 user_found = True
+    #                 break
+    #         if not user_found:
+    #             messagebox.showerror("Login Failed", "Invalid username or password.", parent=self.root)
+    #         elif name and ' ' not in name and len(name) <= 50:
+    #             self.MY_NAME = name
+    #         elif name:
+    #             messagebox.showwarning("Invalid Name", "Name cannot contain spaces and must be 50 chars or less.", parent=self.root)
+    #         else:
+    #             messagebox.showwarning("Invalid Name", "Name cannot be empty.", parent=self.root)
+
+    def get_username(self):
+        db_path = os.path.join("shitdb", "db.json")  # Path to the database file
+        try:
+            with open(db_path, "r") as db_file:
+                db_data = json.load(db_file)  # Load the database
+        except FileNotFoundError:
+            messagebox.showerror("Database Error", "User database not found.", parent=self.root)
+            return
+        except json.JSONDecodeError:
+            messagebox.showerror("Database Error", "Invalid database format.", parent=self.root)
+            return
+    
+        while not self.MY_NAME:
+            # Create a custom dialog for username and password
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Login")
+            dialog.geometry("300x200")
+            dialog.transient(self.root)
+            dialog.grab_set()
+    
+            tk.Label(dialog, text="Username:").pack(pady=(10, 0))
+            username_entry = tk.Entry(dialog)
+            username_entry.pack(pady=(0, 10))
+    
+            tk.Label(dialog, text="Password:").pack()
+            password_entry = tk.Entry(dialog, show="*")
+            password_entry.pack(pady=(0, 10))
+    
+            def submit():
+                dialog.username = username_entry.get().strip()
+                dialog.password = password_entry.get().strip()
+                dialog.destroy()
+    
+            def login_as_guest():
+                dialog.username = f"Guest_{random.randint(1000, 9999)}"
+                dialog.password = None
+                dialog.destroy()
+    
+            tk.Button(dialog, text="Submit", command=submit).pack(pady=(10, 0))
+            tk.Button(dialog, text="Login as Guest", command=login_as_guest).pack(pady=(5, 0))
+    
+            self.root.wait_window(dialog)
+    
+            name = getattr(dialog, "username", None)
+            password = getattr(dialog, "password", None)
+    
+            if not name:  # User cancelled or left fields empty
+                break
+    
+            # Validate credentials if not logging in as guest
+            if password is not None:
+                user_found = False
+                for user in db_data.get("users", []):
+                    if user["username"] == name and user["password"] == password:
+                        self.MY_NAME = name
+                        user_found = True
+                        break
+    
+                if not user_found:
+                    messagebox.showerror("Login Failed", "Invalid username or password.", parent=self.root)
+                elif name and ' ' not in name and len(name) <= 50:
+                    self.MY_NAME = name
+                elif name:
+                    messagebox.showwarning("Invalid Name", "Name cannot contain spaces and must be 50 chars or less.", parent=self.root)
+                else:
+                    messagebox.showwarning("Invalid Name", "Name cannot be empty.", parent=self.root)
+            else:
+                # Guest login
+                self.MY_NAME = name
     def create_widgets(self):
         # Main Frame
         main_frame = Frame(self.root, padx=5, pady=5)
