@@ -13,7 +13,7 @@ BUFFER_SIZE = 4096
 
 # --- Shared State ---
 peer_lock = threading.Lock()
-# Store logged-in users: { peer_id: {'socket': s, 'addr': a, 'p2p_port': p, 'name': n, 'id': user_id, 'guest': False} }
+# Store logged-in users: { peer_id: {'socket': s, 'addr': a, 'p2p_port': p, 'name': n, 'id': user_id, 'guest': False, 'invisible': False} }
 logged_in_peers = {}
 # Store guest users: { peer_id: {'socket': s, 'addr': a, 'p2p_port': p, 'name': n, 'guest': True} }
 guest_peers = {}
@@ -120,10 +120,14 @@ def register_new_user(user_id, name):
 
 
 def get_logged_in_peers_dict():
-    """Returns a serializable dict of currently logged-in peers' info."""
+    """Returns a serializable dict of currently logged-in peers' info, excluding invisible peers."""
     peers_dict = {}
     with peer_lock:
         for pid, info in logged_in_peers.items():
+            # Skip users who have enabled invisible mode
+            if info.get('invisible', False):
+                continue
+            
             peers_dict[pid] = {
                 'name': info.get('name'),
                 'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
@@ -252,7 +256,8 @@ def handle_client(client_socket, client_address):
                                 'socket': client_socket, 'addr': client_address,
                                 'p2p_port': p2p_port, 'name': clean_name,
                                 'id': user_id, # Store the validated user ID
-                                'guest': False
+                                'guest': False,
+                                'invisible': False  # Default to visible
                             }
                             with peer_lock:
                                 logged_in_peers[peer_id] = peer_info
@@ -273,6 +278,46 @@ def handle_client(client_socket, client_address):
                             join_info = {'ip': client_ip, 'p2p_port': p2p_port, 'name': clean_name} # Add user_id? maybe not needed publicly
                             broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
 
+                        # --- Handle 'toggle_invisible' Request ---
+                        elif msg_type == 'toggle_invisible':
+                            invisible_status = message.get('invisible', False)
+                            if is_client_guest:
+                                send_error_to_peer(peer_id, "Guests cannot use invisible mode.")
+                                continue
+                                
+                            with peer_lock:
+                                if peer_id in logged_in_peers:
+                                    logged_in_peers[peer_id]['invisible'] = invisible_status
+                                    status_str = "enabled" if invisible_status else "disabled"
+                                    print(f"[STATUS] Peer '{registered_peer_name}' {status_str} invisible mode.")
+                            
+                            # If becoming visible again, send an update to all peers
+                            if not invisible_status:
+                                # Re-send peer list to everyone
+                                current_peers_dict = get_logged_in_peers_dict()
+                                for pid in logged_in_peers:
+                                    if pid != peer_id:  # Don't send to self
+                                        peers_for_client = {p_id: p_info for p_id, p_info in current_peers_dict.items() if p_id != pid}
+                                        send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
+                                        
+                                # Also broadcast join notification again
+                                join_info = {
+                                    'ip': client_ip, 
+                                    'p2p_port': p2p_port, 
+                                    'name': registered_peer_name
+                                }
+                                broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
+                            
+                            # If becoming invisible, update peer lists
+                            if invisible_status:
+                                # Get updated list (which excludes invisible users)
+                                current_peers_dict = get_logged_in_peers_dict()
+                                # Send updated list to all peers
+                                for pid in logged_in_peers:
+                                    if pid != peer_id:  # Don't send to self
+                                        peers_for_client = {p_id: p_info for p_id, p_info in current_peers_dict.items() if p_id != pid}
+                                        send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
+                                        
                         # --- Unknown Login Type ---
                         else:
                              send_error_to_peer(temp_peer_id, f"Unknown login type: {msg_type}"); time.sleep(0.1); return
@@ -356,7 +401,47 @@ def handle_client(client_socket, client_address):
                             with channel_lock:
                                  channels_payload = { name: {'owner_name': info.get('owner_name', 'N/A'), 'owner_ip': info.get('owner_ip', 'N/A'), 'owner_p2p_port': info.get('owner_p2p_port', 'N/A')} for name, info in registered_channels.items()}
                             send_message_to_peer(peer_id, {'type': 'channel_list', 'channels': channels_payload})
-
+                            
+                        # --- Handle 'toggle_invisible' Request ---
+                        elif msg_type == 'toggle_invisible':
+                            invisible_status = message.get('invisible', False)
+                            if is_client_guest:
+                                send_error_to_peer(peer_id, "Guests cannot use invisible mode.")
+                                continue
+                                
+                            with peer_lock:
+                                if peer_id in logged_in_peers:
+                                    logged_in_peers[peer_id]['invisible'] = invisible_status
+                                    status_str = "enabled" if invisible_status else "disabled"
+                                    print(f"[STATUS] Peer '{registered_peer_name}' {status_str} invisible mode.")
+                            
+                            # If becoming visible again, send an update to all peers
+                            if not invisible_status:
+                                # Re-send peer list to everyone
+                                current_peers_dict = get_logged_in_peers_dict()
+                                for pid in logged_in_peers:
+                                    if pid != peer_id:  # Don't send to self
+                                        peers_for_client = {p_id: p_info for p_id, p_info in current_peers_dict.items() if p_id != pid}
+                                        send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
+                                        
+                                # Also broadcast join notification again
+                                join_info = {
+                                    'ip': client_ip, 
+                                    'p2p_port': p2p_port, 
+                                    'name': registered_peer_name
+                                }
+                                broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
+                            
+                            # If becoming invisible, update peer lists
+                            if invisible_status:
+                                # Get updated list (which excludes invisible users)
+                                current_peers_dict = get_logged_in_peers_dict()
+                                # Send updated list to all peers
+                                for pid in logged_in_peers:
+                                    if pid != peer_id:  # Don't send to self
+                                        peers_for_client = {p_id: p_info for p_id, p_info in current_peers_dict.items() if p_id != pid}
+                                        send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
+                                        
                         # --- Handle other message types ---
                         # Add handlers for /join, /leave, /ch_msg etc. later
                         else:

@@ -24,6 +24,7 @@ MY_NAME = None
 MY_ID = None
 is_guest = None
 MY_INFO = {} # Populated after P2P listener starts and potentially corrected by server
+is_invisible = False # Track whether user is in invisible mode
 
 # --- Helper Functions (Keep get_local_ip, update_my_info, get_peer_name_by_address, get_peer_info_by_name) ---
 # ... (Include the exact functions from your previous code) ...
@@ -486,6 +487,7 @@ def start_p2p_client():
     print("  /list_channels     - Request list of all channels")
     print("  /my_channels       - List channels you are in")
     print("  /members <channel> - List members of owned channel")
+    print("  /invisible         - Toggle invisible mode (hide from /list)")
     print("  /quit              - Exit")
     print("-" * 30)
 
@@ -526,7 +528,12 @@ def start_p2p_client():
         elif cmd_lower == '/myinfo':
              # ... (Keep implementation as before) ...
             print("[YOUR INFO]:"); print(f"  Data: {MY_INFO}"); print(f"  Status: {'Guest' if is_guest else f'User (ID: {MY_ID})'}")
+            print(f"  Invisible Mode: {'Enabled' if is_invisible else 'Disabled'}")
 
+        elif cmd_lower == '/invisible':
+            # Toggle invisible mode
+            toggle_invisible_mode(registry_socket)
+            
         elif cmd_lower.startswith('/msg '):
              # ... (Keep implementation as before) ...
              parts = cmd.split(' ', 2);
@@ -595,6 +602,35 @@ def start_p2p_client():
     time.sleep(0.5)
     print("[CLOSED] Client shut down.")
 
+# --- Function to toggle invisible mode ---
+def toggle_invisible_mode(registry_socket):
+    """Sends a request to the registry server to toggle invisible mode."""
+    global is_invisible
+    
+    if not registry_socket:
+        print("[ERROR] Cannot toggle invisible mode: Not connected to registry.")
+        return False
+    
+    try:
+        # Toggle the status
+        is_invisible = not is_invisible
+        status_msg = "enabled" if is_invisible else "disabled"
+        
+        # Send toggle request to server
+        toggle_msg = {
+            'type': 'toggle_invisible',
+            'invisible': is_invisible
+        }
+        toggle_msg_json = json.dumps(toggle_msg) + "\n"
+        registry_socket.sendall(toggle_msg_json.encode('utf-8'))
+        print(f"[CMD] Invisible mode {status_msg}. Other peers {'cannot' if is_invisible else 'can'} see you in /list.")
+        return True
+    except socket.error as e:
+        print(f"[ERROR] Socket error sending invisible mode toggle: {e}")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Unexpected error toggling invisible mode: {e}")
+        return False
 
 # --- Entry Point ---
 if __name__ == "__main__":
