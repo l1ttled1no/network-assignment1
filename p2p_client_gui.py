@@ -9,6 +9,7 @@ import random
 import ipaddress
 from queue import Queue, Empty # For thread-safe communication
 import os
+TIMEOUT = 300 
 # --- Configuration (Same as your original client) ---
 REGISTRY_HOST = '127.0.0.1'
 REGISTRY_PORT = 9999
@@ -228,7 +229,7 @@ class P2PClientGUI:
         self.log_message(f"[INFO] Connecting to Registry {REGISTRY_HOST}:{REGISTRY_PORT}...")
         try:
             self.registry_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.registry_socket.settimeout(10.0) # Connection timeout
+            self.registry_socket.settimeout(TIMEOUT) # Connection timeout
             self.registry_socket.connect((REGISTRY_HOST, REGISTRY_PORT))
             self.registry_socket.settimeout(None) # Reset timeout after connection
             self.log_message("[INFO] Connected to Registry.")

@@ -3,13 +3,55 @@
         {
             "userid": 1,
             "username": "alice",
-            "password": "aliceHashedPassword", 
+            "password": "alice", 
             "login_status": false
         },
         {
             "userid": 2,
             "username": "bob",
-            "password": "bobHashedPassword", 
+            "password": "bob", 
+            "login_status": false
+        },
+        {
+            "userid": 3,
+            "username": "charlie",
+            "password": "charlie", 
+            "login_status": false
+        },
+        {
+            "userid": 4,
+            "username": "dave",
+            "password": "dave", 
+            "login_status": false
+        },
+        {
+            "userid": 5,
+            "username": "eve",
+            "password": "eve", 
+            "login_status": false
+        },
+        {
+            "userid": 6,
+            "username": "frank",
+            "password": "frank", 
+            "login_status": false
+        },
+        {
+            "userid": 7,
+            "username": "grace",
+            "password": "grace", 
+            "login_status": false
+        },
+        {
+            "userid": 8,
+            "username": "heidi",
+            "password": "heidi", 
+            "login_status": false
+        },
+        {
+            "userid": 9,
+            "username": "ivan",
+            "password": "ivan", 
             "login_status": false
         },
         {
