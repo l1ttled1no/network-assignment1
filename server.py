@@ -66,6 +66,7 @@ def broadcast_update(message_dict, exclude_peer_id=None):
     with peer_lock:
         # Create a list of peer IDs to avoid issues if dict changes during iteration
         peer_ids = list(logged_in_peers.keys())
+        peer_ids.extend(list(guest_peers.keys()))
 
     for pid in peer_ids:
         if pid != exclude_peer_id:
@@ -119,7 +120,7 @@ def register_new_user(user_id, name):
             return False # Or just return True as they exist
 
 
-def get_logged_in_peers_dict():
+def get_peers_dict():
     """Returns a serializable dict of currently logged-in peers' info."""
     peers_dict = {}
     with peer_lock:
@@ -129,6 +130,12 @@ def get_logged_in_peers_dict():
                 'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
                 'p2p_port': info.get('p2p_port')
                 # DO NOT include socket object
+            }
+        for pid, info in guest_peers.items():
+            peers_dict[pid] = {
+                'name': info.get('name'),
+                'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
+                'p2p_port': info.get('p2p_port')
             }
     return peers_dict
 
@@ -216,6 +223,16 @@ def handle_client(client_socket, client_address):
                             ack_msg = {'type': 'guest_ack', 'message': f"Registered as Guest '{clean_name}'.", 'client_ip': client_ip}
                             send_message_to_peer(peer_id, ack_msg)
 
+                            # Send Peer List 
+                            current_peers_dict = get_peers_dict()
+                            print(current_peers_dict)
+                            peers_for_client = {pid: pinfo for pid, pinfo in current_peers_dict.items() if pid != peer_id}
+                            send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
+
+                            # Broadcast Join (only for logged-in users)
+                            join_info = {'ip': client_ip, 'p2p_port': p2p_port, 'name': clean_name} # Add user_id? maybe not needed publicly
+                            broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
+
                         # --- Handle User Login ---
                         elif msg_type == 'user_login':
                             if not received_id or not str(received_id).isdigit():
@@ -265,7 +282,7 @@ def handle_client(client_socket, client_address):
                             send_message_to_peer(peer_id, ack_msg)
 
                             # Send Peer List (only to logged-in users)
-                            current_peers_dict = get_logged_in_peers_dict()
+                            current_peers_dict = get_peers_dict()
                             peers_for_client = {pid: pinfo for pid, pinfo in current_peers_dict.items() if pid != peer_id} # Exclude self
                             send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
 
@@ -327,6 +344,7 @@ def handle_client(client_socket, client_address):
                                 continue
 
                             channel_name = message.get('channel_name')
+                            channel_type = message.get('channel_type')
                             owner_name_from_msg = message.get('owner_name')
                             # Validation... (same as your previous code, but use peer_id)
                             if not channel_name or not owner_name_from_msg: send_error_to_peer(peer_id, "Invalid create_channel format."); continue
@@ -339,22 +357,27 @@ def handle_client(client_socket, client_address):
                             with channel_lock:
                                 if clean_channel_name in registered_channels: send_error_to_peer(peer_id, f"Channel name '{clean_channel_name}' taken.")
                                 else:
-                                    new_channel_info = {'owner_id': peer_id, 'owner_name': registered_peer_name, 'owner_ip': client_ip, 'owner_p2p_port': peer_info['p2p_port'], 'created_at': time.time()}
+                                    new_channel_info = {'channel_type': channel_type, 'owner_id': peer_id, 'owner_name': registered_peer_name, 'owner_ip': client_ip, 'owner_p2p_port': peer_info['p2p_port'], 'created_at': time.time()}
                                     registered_channels[clean_channel_name] = new_channel_info
                                     channel_created_successfully = True
                                     print(f"[REGISTRY] Registered channel '{clean_channel_name}' by {registered_peer_name}.")
 
                             if channel_created_successfully:
-                                 send_message_to_peer(peer_id, {'type': 'channel_created','channel_name': clean_channel_name,'owner_name': registered_peer_name})
-                                 # Broadcast to logged-in users only? Or guests too? Let's do logged-in for now.
-                                 broadcast_update({'type': 'new_channel_available','channel_name': clean_channel_name,'owner_name': registered_peer_name,'owner_ip': client_ip,'owner_p2p_port': peer_info['p2p_port']}, exclude_peer_id=peer_id)
+                                send_message_to_peer(peer_id, {'type': 'channel_created','channel_name': clean_channel_name,'owner_name': registered_peer_name})
+                            #      broadcast_update({'type': 'new_channel_available','channel_name': clean_channel_name,'owner_name': registered_peer_name,'owner_ip': client_ip,'owner_p2p_port': peer_info['p2p_port']}, exclude_peer_id=peer_id)
 
                         # --- Handle 'request_channel_list' Request ---
                         elif msg_type == 'request_channel_list':
                             print(f"[REQUEST] Peer '{registered_peer_name}' requested channel list.")
                             channels_payload = {}
                             with channel_lock:
-                                 channels_payload = { name: {'owner_name': info.get('owner_name', 'N/A'), 'owner_ip': info.get('owner_ip', 'N/A'), 'owner_p2p_port': info.get('owner_p2p_port', 'N/A')} for name, info in registered_channels.items()}
+                                if is_client_guest:
+                                    channels_payload = { name: {'owner_name': info.get('owner_name', 'N/A'), 'owner_ip': info.get('owner_ip', 'N/A'), 'owner_p2p_port': info.get('owner_p2p_port', 'N/A')} 
+                                        for name, info in registered_channels.items()
+                                        if info.get('channel_type') == 'public'
+                                        }
+                                else:
+                                    channels_payload = { name: {'owner_name': info.get('owner_name', 'N/A'), 'owner_ip': info.get('owner_ip', 'N/A'), 'owner_p2p_port': info.get('owner_p2p_port', 'N/A')} for name, info in registered_channels.items()}
                             send_message_to_peer(peer_id, {'type': 'channel_list', 'channels': channels_payload})
 
                         # --- Handle other message types ---
