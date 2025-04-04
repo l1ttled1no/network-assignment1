@@ -4,6 +4,7 @@ import threading
 import json
 import time
 import sys
+import uuid
 
 # --- Configuration ---
 HOST = '0.0.0.0'
@@ -25,9 +26,7 @@ user_credentials_lock = threading.Lock()
 # { user_id: {'name': name, 'password_hash': ...} } # In real app, use hashed passwords!
 # For this example, we'll just check ID and Name match if user exists
 registered_users_db = {
-    "123": {"name": "An"},
-    "456": {"name": "Duy"},
-    "789": {"name": "Khanh"}
+
     # Add more pre-registered users if needed for testing
 }
 
@@ -41,7 +40,7 @@ def send_message_to_peer(peer_id, message_dict):
     target_peer_info = None
     with peer_lock:
         target_peer_info = logged_in_peers.get(peer_id) or guest_peers.get(peer_id)
-
+    # print(target_peer_info)
     if target_peer_info and target_peer_info.get('socket'):
         try:
             msg_json = json.dumps(message_dict) + "\n"
@@ -104,25 +103,20 @@ def validate_user_login(user_id, name):
             # Allow first-time login? Or reject unknown IDs?
             # For now, let's allow first-time registration via login command
             # Check if the desired name is already associated with *another* ID
-            for existing_id, creds in registered_users_db.items():
-                if creds['name'] == name:
-                    return False, f"Name '{name}' is registered to a different ID."
-            # If name is free and ID is new, allow registration
+            registered_users_db[user_id] = {'name': name}
             return True, None # Treat as valid first-time login
-            # Alternatively, reject: return False, f"User ID '{user_id}' not found."
-
 
 def register_new_user(user_id, name):
-     """Adds a new user to the 'DB'. Assumes validation already passed."""
-     with user_credentials_lock:
-         if user_id not in registered_users_db:
-             registered_users_db[user_id] = {'name': name}
-             print(f"[AUTH] Registered new user in DB: ID={user_id}, Name={name}")
-             return True
-         else:
-              # Should not happen if validate_user_login is correct, but good failsafe
-              print(f"[AUTH WARN] Attempted to re-register existing user ID: {user_id}")
-              return False # Or just return True as they exist
+    """Adds a new user to the 'DB'. Assumes validation already passed."""
+    with user_credentials_lock:
+        if user_id not in registered_users_db:
+            registered_users_db[user_id] = {'name': name}
+            print(f"[AUTH] Registered new user in DB: ID={user_id}, Name={name}")
+            return True
+        else:
+            # Should not happen if validate_user_login is correct, but good failsafe
+            print(f"[AUTH WARN] Attempted to re-register existing user ID: {user_id}")
+            return False # Or just return True as they exist
 
 
 def get_logged_in_peers_dict():
@@ -148,6 +142,7 @@ def handle_client(client_socket, client_address):
     # peer_info will be populated after successful login/guest registration
     peer_info = None
     peer_id = None # Will be set on successful registration
+    session_id = None  # Create a session id for each peer login
     registered_peer_name = None # Keep track for logging/cleanup
     is_client_guest = None # Keep track for cleanup
     buffer = ""
@@ -204,7 +199,7 @@ def handle_client(client_socket, client_address):
                                 time.sleep(0.1); return
 
                             # Guest registration successful
-                            peer_id = f"guest_{client_ip}:{p2p_port}" # Generate a guest-specific ID
+                            peer_id = f"guest_{p2p_port}" # Generate a guest-specific ID
                             is_client_guest = True
                             peer_info = {
                                 'socket': client_socket, 'addr': client_address,
@@ -223,59 +218,60 @@ def handle_client(client_socket, client_address):
 
                         # --- Handle User Login ---
                         elif msg_type == 'user_login':
-                             if not received_id or not str(received_id).isdigit():
-                                 send_error_to_peer(temp_peer_id, "User login requires a numeric ID."); time.sleep(0.1); return
+                            if not received_id or not str(received_id).isdigit():
+                                send_error_to_peer(temp_peer_id, "User login requires a numeric ID."); time.sleep(0.1); return
 
-                             user_id = str(received_id)
+                            user_id = str(received_id)
 
-                             # Check if name is used by *another* logged-in user
-                             with peer_lock:
-                                 for pid, info in logged_in_peers.items():
-                                      if info.get('name') == clean_name and info.get('id') != user_id:
-                                          send_error_to_peer(temp_peer_id, f"Name '{clean_name}' is in use by another logged-in user."); time.sleep(0.1); return
-                                      # Check if ID is used by *another* logged-in user (duplicate login attempt?)
-                                      if info.get('id') == user_id and info.get('socket') != client_socket:
-                                          # Handle duplicate login - e.g., disconnect old session? Deny new?
-                                          send_error_to_peer(temp_peer_id, f"User ID '{user_id}' is already logged in. Disconnect other session first."); time.sleep(0.1); return
+                            # Check if name is used by *another* logged-in user
+                            # with peer_lock:
+                            #     for pid, info in logged_in_peers.items():
+                            #         if info.get('name') == clean_name
+                            #         if info.get('name') == clean_name and info.get('id') != user_id:
+                            #             send_error_to_peer(temp_peer_id, f"Name '{clean_name}' is in use by another logged-in user."); time.sleep(0.1); return
+                            #         # Check if ID is used by *another* logged-in user (duplicate login attempt?)
+                            #         if info.get('id') == user_id and info.get('socket') != client_socket:
+                            #             # Handle duplicate login - e.g., disconnect old session? Deny new?
+                            #             send_error_to_peer(temp_peer_id, f"User ID '{user_id}' is already logged in. Disconnect other session first."); time.sleep(0.1); return
 
-                             # Check against "DB"
-                             valid_creds, error_msg = validate_user_login(user_id, clean_name)
-                             print('Else')
-                             if not valid_creds:
-                                  send_error_to_peer(temp_peer_id, f"Login failed: {error_msg}"); time.sleep(0.1); return
+                            # Check against "DB"
+                            valid_creds, error_msg = validate_user_login(user_id, clean_name)
+                            # print('Else')
+                            if not valid_creds:
+                                send_error_to_peer(temp_peer_id, f"Login failed: {error_msg}"); time.sleep(0.3); return
 
                              # --- Login Success ---
                              # Register new user in DB if they didn't exist (first login)
-                             with user_credentials_lock:
-                                 if user_id not in registered_users_db:
-                                     register_new_user(user_id, clean_name)
+                            # with user_credentials_lock:
+                            #     if user_id not in registered_users_db:
+                            #         register_new_user(user_id, clean_name)
 
-                             peer_id = f"user_{client_ip}:{p2p_port}" # Generate user-specific ID
-                             is_client_guest = False
-                             peer_info = {
-                                 'socket': client_socket, 'addr': client_address,
-                                 'p2p_port': p2p_port, 'name': clean_name,
-                                 'id': user_id, # Store the validated user ID
-                                 'guest': False
-                             }
-                             with peer_lock:
-                                 logged_in_peers[peer_id] = peer_info
-                             registered_peer_name = clean_name
-                             registration_success = True
-                             print(f"[REGISTERED USER] '{clean_name}' (ID: {user_id}, PeerID: {peer_id}) from {client_address}.")
+                            peer_id = f"user_{client_ip}:{p2p_port}" # Generate user-specific ID
+                            is_client_guest = False
+                            peer_info = {
+                                'socket': client_socket, 'addr': client_address,
+                                'p2p_port': p2p_port, 'name': clean_name,
+                                'id': user_id, # Store the validated user ID
+                                'guest': False
+                            }
+                            with peer_lock:
+                                logged_in_peers[peer_id] = peer_info
+                            registered_peer_name = clean_name
+                            registration_success = True
+                            print(f"[REGISTERED USER] '{clean_name}' (ID: {user_id}, PeerID: {peer_id}) from {client_address}.")
 
-                             # Send Ack
-                             ack_msg = {'type': 'login_ack', 'message': f"Logged in as User '{clean_name}'.", 'client_ip': client_ip}
-                             send_message_to_peer(peer_id, ack_msg)
+                            # Send Ack
+                            ack_msg = {'type': 'login_ack', 'message': f"Logged in as User '{clean_name}'.", 'client_ip': client_ip}
+                            send_message_to_peer(peer_id, ack_msg)
 
-                             # Send Peer List (only to logged-in users)
-                             current_peers_dict = get_logged_in_peers_dict()
-                             peers_for_client = {pid: pinfo for pid, pinfo in current_peers_dict.items() if pid != peer_id} # Exclude self
-                             send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
+                            # Send Peer List (only to logged-in users)
+                            current_peers_dict = get_logged_in_peers_dict()
+                            peers_for_client = {pid: pinfo for pid, pinfo in current_peers_dict.items() if pid != peer_id} # Exclude self
+                            send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
 
-                             # Broadcast Join (only for logged-in users)
-                             join_info = {'ip': client_ip, 'p2p_port': p2p_port, 'name': clean_name} # Add user_id? maybe not needed publicly
-                             broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
+                            # Broadcast Join (only for logged-in users)
+                            join_info = {'ip': client_ip, 'p2p_port': p2p_port, 'name': clean_name} # Add user_id? maybe not needed publicly
+                            broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
 
                         # --- Unknown Login Type ---
                         else:

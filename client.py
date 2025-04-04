@@ -373,7 +373,6 @@ def login_or_guest(host, port):
                                 ack_received = True # Exit loop
                                 success = False
                                 break # Break inner recv loop
-
                             buffer += data.decode('utf-8')
                             if '\n' in buffer:
                                 response_json, buffer = buffer.split('\n', 1)
