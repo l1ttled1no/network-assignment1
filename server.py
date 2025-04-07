@@ -128,14 +128,15 @@ def get_peers_dict():
             peers_dict[pid] = {
                 'name': info.get('name'),
                 'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
-                'p2p_port': info.get('p2p_port')
-                # DO NOT include socket object
+                'p2p_port': info.get('p2p_port'),
+                'is_invisible': info.get('is_invisible', False)  # Add invisible status
             }
         for pid, info in guest_peers.items():
             peers_dict[pid] = {
                 'name': info.get('name'),
                 'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
-                'p2p_port': info.get('p2p_port')
+                'p2p_port': info.get('p2p_port'),
+                'is_invisible': info.get('is_invisible', False)  # Add invisible status
             }
     return peers_dict
 
@@ -211,7 +212,8 @@ def handle_client(client_socket, client_address):
                             peer_info = {
                                 'socket': client_socket, 'addr': client_address,
                                 'p2p_port': p2p_port, 'name': clean_name,
-                                'guest': True
+                                'guest': True,
+                                'is_invisible': message.get('is_invisible', False)  # Add invisible status
                             }
                             with peer_lock:
                                 guest_peers[peer_id] = peer_info
@@ -226,11 +228,20 @@ def handle_client(client_socket, client_address):
                             # Send Peer List 
                             current_peers_dict = get_peers_dict()
                             print(current_peers_dict)
-                            peers_for_client = {pid: pinfo for pid, pinfo in current_peers_dict.items() if pid != peer_id}
+                            peers_for_client = {
+                                pid: pinfo 
+                                for pid, pinfo in current_peers_dict.items() 
+                                if pid != peer_id and not pinfo.get('is_invisible', False)
+                            }
                             send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
 
                             # Broadcast Join (only for logged-in users)
-                            join_info = {'ip': client_ip, 'p2p_port': p2p_port, 'name': clean_name} # Add user_id? maybe not needed publicly
+                            join_info = {
+                                'ip': client_ip, 
+                                'p2p_port': p2p_port, 
+                                'name': clean_name,
+                                'is_invisible': peer_info.get('is_invisible', False)
+                            } # Include invisible status
                             broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
 
                         # --- Handle User Login ---
@@ -269,7 +280,8 @@ def handle_client(client_socket, client_address):
                                 'socket': client_socket, 'addr': client_address,
                                 'p2p_port': p2p_port, 'name': clean_name,
                                 'id': user_id, # Store the validated user ID
-                                'guest': False
+                                'guest': False,
+                                'is_invisible': message.get('is_invisible', False)  # Add invisible status
                             }
                             with peer_lock:
                                 logged_in_peers[peer_id] = peer_info
@@ -283,32 +295,72 @@ def handle_client(client_socket, client_address):
 
                             # Send Peer List (only to logged-in users)
                             current_peers_dict = get_peers_dict()
-                            peers_for_client = {pid: pinfo for pid, pinfo in current_peers_dict.items() if pid != peer_id} # Exclude self
+                            peers_for_client = {
+                                pid: pinfo 
+                                for pid, pinfo in current_peers_dict.items() 
+                                if pid != peer_id and not pinfo.get('is_invisible', False)
+                            } # Exclude self and invisible peers
                             send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
 
                             # Broadcast Join (only for logged-in users)
-                            join_info = {'ip': client_ip, 'p2p_port': p2p_port, 'name': clean_name} # Add user_id? maybe not needed publicly
+                            join_info = {
+                                'ip': client_ip, 
+                                'p2p_port': p2p_port, 
+                                'name': clean_name,
+                                'is_invisible': peer_info.get('is_invisible', False)
+                            } # Include invisible status
                             broadcast_update({'type': 'peer_joined', 'id': peer_id, 'peer_info': join_info}, exclude_peer_id=peer_id)
 
-                        # --- Unknown Login Type ---
+                        # --- Handle 'request_channel_list' Request ---
+                        elif msg_type == 'request_channel_list':
+                            print(f"[REQUEST] Peer '{registered_peer_name}' requested channel list.")
+                            channels_payload = {}
+                            with channel_lock:
+                                if is_client_guest:
+                                    channels_payload = { 
+                                        name: {
+                                            'owner_name': info.get('owner_name', 'N/A'), 
+                                            'owner_ip': info.get('owner_ip', 'N/A'), 
+                                            'owner_p2p_port': info.get('owner_p2p_port', 'N/A')
+                                        } 
+                                        for name, info in registered_channels.items()
+                                        if info.get('channel_type') == 'public'
+                                    }
+                                else:
+                                    channels_payload = { 
+                                        name: {
+                                            'owner_name': info.get('owner_name', 'N/A'), 
+                                            'owner_ip': info.get('owner_ip', 'N/A'), 
+                                            'owner_p2p_port': info.get('owner_p2p_port', 'N/A')
+                                        } 
+                                        for name, info in registered_channels.items()
+                                    }
+                            send_message_to_peer(peer_id, {'type': 'channel_list', 'channels': channels_payload})
+
+                        # --- Handle Unknown Login Type ---
                         else:
                              send_error_to_peer(temp_peer_id, f"Unknown login type: {msg_type}"); time.sleep(0.1); return
 
-                    except json.JSONDecodeError: print(f"[ERROR] Invalid JSON during login from {client_address}. Disconnecting."); return
-                    except (socket.error, OSError) as e: print(f"[ERROR] Socket error during login processing: {e}"); return
-                    except Exception as e: print(f"[ERROR] Unexpected error processing login: {e}. Disconnecting."); return
-
-                # If buffer doesn't contain newline yet, continue receiving in the while loop
+                    except json.JSONDecodeError:
+                        print(f"[ERROR] Invalid JSON during login from {client_address}. Disconnecting.")
+                        return
+                    except (socket.error, OSError) as e:
+                        print(f"[ERROR] Socket error during login processing: {e}")
+                        return
+                    except Exception as e:
+                        print(f"[ERROR] Unexpected error processing login: {e}. Disconnecting.")
+                        return
                 else:
-                     pass # Continue loop to wait for more data
-
-
+                    pass # Continue loop to wait for more data
             except socket.timeout:
-                 print(f"[TIMEOUT] Peer {client_address} timed out waiting for login info."); return
+                print(f"[TIMEOUT] Peer {client_address} timed out waiting for login info.")
+                return
             except (socket.error, ConnectionResetError, BrokenPipeError) as e:
-                 print(f"[ERROR] Socket error receiving login info: {e}. Disconnecting."); return
+                print(f"[ERROR] Socket error receiving login info: {e}. Disconnecting.")
+                return
             except UnicodeDecodeError:
-                 print(f"[ERROR] Non-UTF8 data during login from {client_address}. Disconnecting."); return
+                print(f"[ERROR] Non-UTF8 data during login from {client_address}. Disconnecting.")
+                return
 
         # --- Check if Registration Succeeded ---
         if not registration_success:
@@ -372,36 +424,84 @@ def handle_client(client_socket, client_address):
                             channels_payload = {}
                             with channel_lock:
                                 if is_client_guest:
-                                    channels_payload = { name: {'owner_name': info.get('owner_name', 'N/A'), 'owner_ip': info.get('owner_ip', 'N/A'), 'owner_p2p_port': info.get('owner_p2p_port', 'N/A')} 
+                                    channels_payload = { 
+                                        name: {
+                                            'owner_name': info.get('owner_name', 'N/A'), 
+                                            'owner_ip': info.get('owner_ip', 'N/A'), 
+                                            'owner_p2p_port': info.get('owner_p2p_port', 'N/A')
+                                        } 
                                         for name, info in registered_channels.items()
                                         if info.get('channel_type') == 'public'
-                                        }
+                                    }
                                 else:
-                                    channels_payload = { name: {'owner_name': info.get('owner_name', 'N/A'), 'owner_ip': info.get('owner_ip', 'N/A'), 'owner_p2p_port': info.get('owner_p2p_port', 'N/A')} for name, info in registered_channels.items()}
+                                    channels_payload = { 
+                                        name: {
+                                            'owner_name': info.get('owner_name', 'N/A'), 
+                                            'owner_ip': info.get('owner_ip', 'N/A'), 
+                                            'owner_p2p_port': info.get('owner_p2p_port', 'N/A')
+                                        } 
+                                        for name, info in registered_channels.items()
+                                    }
                             send_message_to_peer(peer_id, {'type': 'channel_list', 'channels': channels_payload})
+
+                        # --- Handle 'update_visibility' Request ---
+                        elif msg_type == 'update_visibility':
+                            new_visibility = message.get('is_invisible', False)
+                            print(f"[VISIBILITY] Peer '{registered_peer_name}' changed visibility to: {'invisible' if new_visibility else 'visible'}")
+                            # Update visibility status in the appropriate peer dictionary
+                            with peer_lock:
+                                if is_client_guest:
+                                    if peer_id in guest_peers:
+                                        guest_peers[peer_id]['is_invisible'] = new_visibility
+                                else:
+                                    if peer_id in logged_in_peers:
+                                        logged_in_peers[peer_id]['is_invisible'] = new_visibility
+                            
+                            # Send updated peer list to all peers
+                            current_peers_dict = get_peers_dict()
+                            for pid in current_peers_dict:
+                                if pid != peer_id:  # Don't send to self
+                                    peers_for_client = {
+                                        p: info 
+                                        for p, info in current_peers_dict.items() 
+                                        if p != pid and not info.get('is_invisible', False)
+                                    }
+                                    send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
 
                         # --- Handle other message types ---
                         # Add handlers for /join, /leave, /ch_msg etc. later
                         else:
                             print(f"[WARNING] Unknown message type '{msg_type}' from '{registered_peer_name}' ({peer_id}): {message_json}")
 
-                    except json.JSONDecodeError: print(f"[ERROR] Invalid JSON from '{registered_peer_name}': {message_json}")
-                    except UnicodeDecodeError: print(f"[ERROR] Corrupted UTF-8 from '{registered_peer_name}'."); buffer = "" # Clear buffer on decode error
-                    except (socket.error, OSError) as send_err: print(f"[ERROR] Socket error processing '{registered_peer_name}': {send_err}"); raise send_err # Raise to outer handler
-                    except Exception as e: print(f"[ERROR] Processing message from '{registered_peer_name}': {e} - Msg: {message_json}")
+                    except json.JSONDecodeError: 
+                        print(f"[ERROR] Invalid JSON from '{registered_peer_name}': {message_json}")
+                    except UnicodeDecodeError: 
+                        print(f"[ERROR] Corrupted UTF-8 from '{registered_peer_name}'.")
+                        buffer = "" # Clear buffer on decode error
+                    except (socket.error, OSError) as send_err: 
+                        print(f"[ERROR] Socket error processing '{registered_peer_name}': {send_err}")
+                        raise send_err # Raise to outer handler
+                    except Exception as e: 
+                        print(f"[ERROR] Processing message from '{registered_peer_name}': {e} - Msg: {message_json}")
 
-            # --- Handle disconnections and errors in the message loop ---
             except (ConnectionResetError, BrokenPipeError, socket.error, OSError) as e:
-                if not shutdown_requested: print(f"[DISCONNECTED] Peer '{registered_peer_name}' ({peer_id}) connection error: {e}"); break
-            except UnicodeDecodeError: print(f"[ERROR] Non-UTF8 stream from '{registered_peer_name}'. Closing."); break
+                if not shutdown_requested: 
+                    print(f"[DISCONNECTED] Peer '{registered_peer_name}' ({peer_id}) connection error: {e}")
+                break
+            except UnicodeDecodeError: 
+                print(f"[ERROR] Non-UTF8 stream from '{registered_peer_name}'. Closing.")
+                break
             except Exception as e:
-                if not shutdown_requested: print(f"[ERROR] Unexpected error handling '{registered_peer_name}': {e}"); break
+                if not shutdown_requested: 
+                    print(f"[ERROR] Unexpected error handling '{registered_peer_name}': {e}")
+                break
 
-    # --- Broad Exception Handling for the whole function ---
     except Exception as e:
         if not shutdown_requested:
             peer_desc = f"'{registered_peer_name}' ({peer_id})" if registered_peer_name else f"{client_ip}:{client_registry_port}"
-            print(f"[CRITICAL ERROR] Unhandled exception in handle_client for {peer_desc}: {e}"); import traceback; traceback.print_exc()
+            print(f"[CRITICAL ERROR] Unhandled exception in handle_client for {peer_desc}: {e}")
+            import traceback
+            traceback.print_exc()
 
     # --- CLEANUP PHASE ---
     finally:
