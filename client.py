@@ -34,6 +34,7 @@ MY_ID = None # For user login
 is_guest = None # Distinguishes guest/user
 MY_INFO = {} # Populated after P2P listener starts
 is_invisible = False # NEW: Track if user is invisible
+is_offline = False # NEW: Track if user is offline
 
 # --- Helper Functions (Keep get_local_ip, update_my_info, get_peer_name_by_address, get_peer_info_by_name) ---
 def get_local_ip():
@@ -530,7 +531,7 @@ def start_p2p_client():
     # --- Logged In ---
     print("-" * 30 + f"\n--- Welcome, {'Guest ' if is_guest else ''}{MY_NAME} " + (f"(ID: {MY_ID})" if not is_guest else "") + " ---")
     print(f"Your Info: {MY_INFO}")
-    print("--- Commands: /list /myinfo /msg /create /join /list_channels /my_channels /members /quit /invisible ---")
+    print("--- Commands: /list /myinfo /msg /create /join /list_channels /my_channels /members /quit /invisible /offline /online ---")
     print("-" * 30)
 
     registry_listener_thread = threading.Thread(target=listen_to_registry, args=(registry_socket,), daemon=True)
@@ -544,10 +545,12 @@ def start_p2p_client():
         if not running: break
         if not cmd: continue
         cmd_lower = cmd.lower()
+        
+        # Add global declarations at the beginning of the loop
+        global is_invisible, is_offline
 
         if cmd_lower == '/quit': running = False; break
         elif cmd_lower == '/invisible':
-            global is_invisible
             is_invisible = not is_invisible
             status = "invisible" if is_invisible else "visible"
             print(f"[STATUS] You are now {status}")
@@ -558,6 +561,29 @@ def start_p2p_client():
             except Exception as e:
                 print(f"[ERROR] Failed to update visibility status: {e}")
                 is_invisible = not is_invisible  # Revert the change if update failed
+        elif cmd_lower == '/offline':
+            if not is_offline:
+                is_offline = True
+                print("[STATUS] You are now offline. You cannot use other features until you go online.")
+                try:
+                    update_msg = {'type': 'update_offline_status', 'is_offline': True}
+                    registry_socket.sendall((json.dumps(update_msg) + "\n").encode('utf-8'))
+                except Exception as e:
+                    print(f"[ERROR] Failed to update offline status: {e}")
+                    is_offline = False
+        elif cmd_lower == '/online':
+            if is_offline:
+                is_offline = False
+                print("[STATUS] You are now online. You can use all features again.")
+                try:
+                    update_msg = {'type': 'update_offline_status', 'is_offline': False}
+                    registry_socket.sendall((json.dumps(update_msg) + "\n").encode('utf-8'))
+                except Exception as e:
+                    print(f"[ERROR] Failed to update offline status: {e}")
+                    is_offline = True
+        elif is_offline:
+            print("[ERROR] You are offline. Use '/online' to use other features.")
+            continue
         elif cmd_lower == '/list': # List known logged-in peers
             print("[KNOWN PEERS (Logged-in)]:")
             with peer_list_lock: peers = sorted(known_peers.values(), key=lambda x: x.get('name', 'z'))

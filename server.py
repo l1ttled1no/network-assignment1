@@ -129,14 +129,16 @@ def get_peers_dict():
                 'name': info.get('name'),
                 'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
                 'p2p_port': info.get('p2p_port'),
-                'is_invisible': info.get('is_invisible', False)  # Add invisible status
+                'is_invisible': info.get('is_invisible', False),  # Add invisible status
+                'is_offline': info.get('is_offline', False)  # Add offline status
             }
         for pid, info in guest_peers.items():
             peers_dict[pid] = {
                 'name': info.get('name'),
                 'ip': info.get('addr', ('N/A', None))[0], # Get IP from address tuple
                 'p2p_port': info.get('p2p_port'),
-                'is_invisible': info.get('is_invisible', False)  # Add invisible status
+                'is_invisible': info.get('is_invisible', False),  # Add invisible status
+                'is_offline': info.get('is_offline', False)  # Add offline status
             }
     return peers_dict
 
@@ -153,6 +155,7 @@ def handle_client(client_socket, client_address):
     session_id = None  # Create a session id for each peer login
     registered_peer_name = None # Keep track for logging/cleanup
     is_client_guest = None # Keep track for cleanup
+    is_offline = False  # NEW: Track offline status
     buffer = ""
 
     try:
@@ -213,7 +216,8 @@ def handle_client(client_socket, client_address):
                                 'socket': client_socket, 'addr': client_address,
                                 'p2p_port': p2p_port, 'name': clean_name,
                                 'guest': True,
-                                'is_invisible': message.get('is_invisible', False)  # Add invisible status
+                                'is_invisible': False,
+                                'is_offline': False  # NEW: Initialize offline status
                             }
                             with peer_lock:
                                 guest_peers[peer_id] = peer_info
@@ -231,7 +235,7 @@ def handle_client(client_socket, client_address):
                             peers_for_client = {
                                 pid: pinfo 
                                 for pid, pinfo in current_peers_dict.items() 
-                                if pid != peer_id and not pinfo.get('is_invisible', False)
+                                if pid != peer_id and not pinfo.get('is_invisible', False) and not pinfo.get('is_offline', False)
                             }
                             send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
 
@@ -281,7 +285,8 @@ def handle_client(client_socket, client_address):
                                 'p2p_port': p2p_port, 'name': clean_name,
                                 'id': user_id, # Store the validated user ID
                                 'guest': False,
-                                'is_invisible': message.get('is_invisible', False)  # Add invisible status
+                                'is_invisible': False,
+                                'is_offline': False  # NEW: Initialize offline status
                             }
                             with peer_lock:
                                 logged_in_peers[peer_id] = peer_info
@@ -298,7 +303,7 @@ def handle_client(client_socket, client_address):
                             peers_for_client = {
                                 pid: pinfo 
                                 for pid, pinfo in current_peers_dict.items() 
-                                if pid != peer_id and not pinfo.get('is_invisible', False)
+                                if pid != peer_id and not pinfo.get('is_invisible', False) and not pinfo.get('is_offline', False)
                             } # Exclude self and invisible peers
                             send_message_to_peer(peer_id, {'type': 'peer_list', 'peers': peers_for_client})
 
@@ -464,7 +469,31 @@ def handle_client(client_socket, client_address):
                                     peers_for_client = {
                                         p: info 
                                         for p, info in current_peers_dict.items() 
-                                        if p != pid and not info.get('is_invisible', False)
+                                        if p != pid and not info.get('is_invisible', False) and not info.get('is_offline', False)
+                                    }
+                                    send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
+
+                        # --- Handle 'update_offline_status' Request ---
+                        elif msg_type == 'update_offline_status':
+                            new_offline_status = message.get('is_offline', False)
+                            print(f"[OFFLINE STATUS] Peer '{registered_peer_name}' changed offline status to: {'offline' if new_offline_status else 'online'}")
+                            # Update offline status in the appropriate peer dictionary
+                            with peer_lock:
+                                if is_client_guest:
+                                    if peer_id in guest_peers:
+                                        guest_peers[peer_id]['is_offline'] = new_offline_status
+                                else:
+                                    if peer_id in logged_in_peers:
+                                        logged_in_peers[peer_id]['is_offline'] = new_offline_status
+                            
+                            # Send updated peer list to all peers
+                            current_peers_dict = get_peers_dict()
+                            for pid in current_peers_dict:
+                                if pid != peer_id and not current_peers_dict[pid].get('is_offline', False):  # Don't send to self or offline peers
+                                    peers_for_client = {
+                                        p: info 
+                                        for p, info in current_peers_dict.items() 
+                                        if p != pid and not info.get('is_invisible', False) and not info.get('is_offline', False)
                                     }
                                     send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
 
