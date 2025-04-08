@@ -224,11 +224,16 @@ def listen_for_peers(host, port):
         p2p_server_socket.close()
 
 # --- Registry Listener ---
+# --- Registry Listener ---
 def listen_to_registry(registry_socket):
     """Listens for updates from the registry *after* successful registration."""
-    global known_peers, running, MY_INFO, my_channels, available_channels_info # Added available_channels_info
+    global known_peers, running, MY_INFO, my_channels, available_channels_info
     buffer = ""
-    prompt = f"{MY_NAME}> "
+    # Determine prompt based on current name BEFORE the loop starts
+    # It might change if there's an unexpected disconnect/reconnect logic later,
+    # but usually, it's stable after login.
+    prompt = f"{MY_NAME}> " if MY_NAME else "> " # Use current name or default
+
     while running:
         try:
             data = registry_socket.recv(BUFFER_SIZE)
@@ -245,52 +250,86 @@ def listen_to_registry(registry_socket):
                     message = json.loads(message_json)
                     msg_type = message.get('type')
 
-                    # --- Peer List/Join/Left (Keep as before) ---
+                    # --- Peer List Handling ---
                     if msg_type == 'peer_list':
-                        print("\n[REGISTRY] Received peer list update.")
+                        # Make sure prompt is up-to-date in case name changed somehow
+                        current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                        print(f"\r{' ' * 60}\r[CLIENT] Received updated peer list from registry.") # Use \r to overwrite prompt line
+
                         server_peers = message.get('peers', {})
-                        with peer_list_lock: 
-                            known_peers = {pid: info for pid, info in server_peers.items() 
-                                         if info.get('name') != MY_NAME and not info.get('is_invisible', False)}
+
+                        with peer_list_lock:
+                            known_peers = server_peers
+                            peers_to_display = dict(known_peers)
+
+                        print("[CLIENT] Currently known available peers:")
+
+                        sorted_peer_list = sorted(peers_to_display.values(), key=lambda p: p.get('name', 'z').lower())
+
+                        if sorted_peer_list:
+                            for p_info in sorted_peer_list:
+                                name = p_info.get('name', '?')
+                                ip = p_info.get('ip', '?')
+                                port = p_info.get('p2p_port', '?')
+                                # ---> NEW: Get login status <---
+                                login_status = p_info.get('login_status', 'unknown') # Get status, default if missing
+
+                                # Format the status for display
+                                status_str = f"({login_status})" # e.g., "(user)" or "(guest)" or "(unknown)"
+
+                                # ---> MODIFIED PRINT <---
+                                print(f"  - {name} {status_str} ({ip}:{port})")
+                        else:
+                            print("  (Registry reported no other available peers)")
+
+                        # Reprint the prompt after displaying the list
+                        print(f"{current_prompt}", end="", flush=True)
+
+                    # --- Peer Joined/Left (Keep as before, but use \r and current prompt) ---
                     elif msg_type == 'peer_joined':
-                         peer_id = message.get('id'); peer_info = message.get('peer_info'); peer_name = peer_info.get('name', 'Unk') if peer_info else 'Unk'
-                         if peer_id and peer_info and peer_name != MY_NAME and not peer_info.get('is_invisible', False):
-                             with peer_list_lock: known_peers[peer_id] = peer_info
-                             print(f"\r{' ' * 60}\r[REGISTRY] Peer joined: {peer_name}\n{prompt}", end="", flush=True)
+                        peer_id = message.get('id'); peer_info = message.get('peer_info'); peer_name = peer_info.get('name', 'Unk') if peer_info else 'Unk'
+                        if peer_id and peer_info and peer_name != MY_NAME and not peer_info.get('is_invisible', False):
+                            with peer_list_lock: known_peers[peer_id] = peer_info
+                            current_prompt = f"{MY_NAME}> " if MY_NAME else "> " # Refresh prompt
+                            print(f"\r{' ' * 60}\r[REGISTRY] Peer joined: {peer_name}\n{current_prompt}", end="", flush=True)
                     elif msg_type == 'peer_left':
                         peer_id = message.get('id')
                         if peer_id:
-                             removed_name = "Unk"
-                             with peer_list_lock:
-                                 if peer_id in known_peers: removed_name = known_peers.pop(peer_id).get('name', 'Unk')
-                             if removed_name != "Unk": print(f"\r{' ' * 60}\r[REGISTRY] Peer left: {removed_name}\n{prompt}", end="", flush=True)
+                            removed_name = "Unk"
+                            with peer_list_lock:
+                                if peer_id in known_peers: removed_name = known_peers.pop(peer_id).get('name', 'Unk')
+                            if removed_name != "Unk":
+                                current_prompt = f"{MY_NAME}> " if MY_NAME else "> " # Refresh prompt
+                                print(f"\r{' ' * 60}\r[REGISTRY] Peer left: {removed_name}\n{current_prompt}", end="", flush=True)
 
-                    # --- Channel Message Handling (Keep as before) ---
+                    # --- Channel Message Handling (Add \r and prompt refresh) ---
                     elif msg_type == 'channel_created':
                          c_name = message.get('channel_name'); c_owner = message.get('owner_name')
-                         print(f"\r{' ' * 60}\r[REGISTRY] Channel '{c_name}' creation confirmed.\n{prompt}", end="", flush=True)
+                         current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                         print(f"\r{' ' * 60}\r[REGISTRY] Channel '{c_name}' creation confirmed.\n{current_prompt}", end="", flush=True)
                          if c_owner == MY_NAME:
                              with my_channels_lock:
                                  if c_name not in my_channels:
-                                     if not MY_INFO: update_my_info(MY_NAME, MY_P2P_PORT) # Ensure MY_INFO exists
+                                     if not MY_INFO: update_my_info(MY_NAME, MY_P2P_PORT)
                                      my_channels[c_name] = {'owner': MY_NAME, 'members': {MY_NAME: MY_INFO.copy()}}
-                                     if not MY_INFO: print(f"[WARN] MY_INFO empty for channel {c_name}")
+                                     # No warning needed now as update_my_info handles it
                     elif msg_type == 'channel_error':
                         error_msg = message.get('message', 'Unk'); c_name = message.get('channel_name', 'N/A')
-                        print(f"\r{' ' * 60}\r[REGISTRY ERROR] Channel '{c_name}': {error_msg}\n{prompt}", end="", flush=True)
+                        current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                        print(f"\r{' ' * 60}\r[REGISTRY ERROR] Channel '{c_name}': {error_msg}\n{current_prompt}", end="", flush=True)
                     elif msg_type == 'new_channel_available':
                         c_name = message.get('channel_name'); c_owner = message.get('owner_name')
                         c_ip = message.get('owner_ip'); c_port = message.get('owner_p2p_port')
-                        print(f"\r{' ' * 60}\r[REGISTRY] New channel available: '{c_name}' (Owner: {c_owner})\n{prompt}", end="", flush=True)
-                        # Update the global available channels list
+                        current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                        print(f"\r{' ' * 60}\r[REGISTRY] New channel available: '{c_name}' (Owner: {c_owner})\n{current_prompt}", end="", flush=True)
                         if c_name and c_owner and c_ip and c_port:
                              with available_channels_info_lock:
                                  available_channels_info[c_name] = {'owner_name': c_owner, 'owner_ip': c_ip, 'owner_p2p_port': c_port}
 
                     elif msg_type == 'channel_list':
+                        current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
                         print(f"\r{' ' * 60}\r[REGISTRY] Received list of all channels:")
                         channels_data = message.get('channels', {})
-                        # Clear previous list and update with new data
                         with available_channels_info_lock:
                             available_channels_info.clear()
                             if channels_data:
@@ -298,7 +337,6 @@ def listen_to_registry(registry_socket):
                                     owner = info.get('owner_name','N/A')
                                     contact = f"{info.get('owner_ip','N/A')}:{info.get('owner_p2p_port','N/A')}"
                                     print(f"  - {name} (Owner: {owner} @ {contact})")
-                                    # Store owner details for joining
                                     available_channels_info[name] = {
                                         'owner_name': owner,
                                         'owner_ip': info.get('owner_ip'),
@@ -306,23 +344,33 @@ def listen_to_registry(registry_socket):
                                     }
                             else:
                                 print("  (No channels currently registered)")
-                        print(f"{prompt}", end="", flush=True)
+                        print(f"{current_prompt}", end="", flush=True) # Reprint prompt
 
                     elif msg_type == 'error':
                         error_msg = message.get('message', 'Unknown server error')
-                        print(f"\r{' ' * 60}\r[SERVER ERROR] {error_msg}\n{prompt}", end="", flush=True)
+                        current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                        print(f"\r{' ' * 60}\r[SERVER ERROR] {error_msg}\n{current_prompt}", end="", flush=True)
 
                     elif msg_type == 'server_shutdown':
-                        print(f"\r{' ' * 60}\r[REGISTRY] {message.get('message', 'Server Shutting Down')}\n{prompt}", end="", flush=True)
-                        running = False # Trigger client shutdown
+                        current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                        print(f"\r{' ' * 60}\r[REGISTRY] {message.get('message', 'Server Shutting Down')}\n{current_prompt}", end="", flush=True)
+                        running = False
 
-                    else: print(f"\r{' ' * 60}\r[REGISTRY UNHANDLED] Type: {msg_type}\n{prompt}", end="", flush=True)
+                    else:
+                         current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                         print(f"\r{' ' * 60}\r[REGISTRY UNHANDLED] Type: {msg_type}\n{current_prompt}", end="", flush=True)
 
-                except json.JSONDecodeError: print(f"\r{' ' * 60}\r[REGISTRY ERROR] Invalid JSON\n{prompt}", end="", flush=True)
+                # --- Exception Handling (Keep as before, maybe add prompt refresh) ---
+                except json.JSONDecodeError:
+                    current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                    print(f"\r{' ' * 60}\r[REGISTRY ERROR] Invalid JSON received\n{current_prompt}", end="", flush=True)
                 except socket.error as e:
                     if running: print(f"\n[ERROR] Socket error in listener: {e}"); running = False; break
-                except Exception as e: print(f"\n[ERROR] Processing registry msg: {e}\nMessage: {message_json}")
+                except Exception as e:
+                    current_prompt = f"{MY_NAME}> " if MY_NAME else "> "
+                    print(f"\n[ERROR] Processing registry msg: {e}\nMessage: {message_json}\n{current_prompt}", end="", flush=True)
 
+        # --- Outer Exception Handling (Keep as before) ---
         except (ConnectionResetError, ConnectionAbortedError):
             if running: print("\n[CONNECTION LOST] Registry closed."); running = False
         except OSError as e:
@@ -331,7 +379,7 @@ def listen_to_registry(registry_socket):
             if running: print(f"\n[ERROR] Receiving from registry: {e}"); running = False
 
     print("[THREAD] Registry listener finished.")
-    running = False # Ensure main loop stops
+    running = False
 
 # --- P2P Message Sending (Keep as before) ---
 def send_p2p_message(target_name, message):
@@ -486,7 +534,7 @@ def login_or_guest(host, port):
                     registry_socket.settimeout(20.0)
                     while not ack_received:
                         try:
-                            data = registry_socket.recv(BUFFER_SIZE);
+                            data = registry_socket.recv(BUFFER_SIZE)
                             if not data: print("[ERROR] Connection closed by server."); ack_received=True; success=False; break
                             buffer += data.decode('utf-8')
                             if '\n' in buffer:
@@ -585,10 +633,13 @@ def start_p2p_client():
             print("[ERROR] You are offline. Use '/online' to use other features.")
             continue
         elif cmd_lower == '/list': # List known logged-in peers
-            print("[KNOWN PEERS (Logged-in)]:")
-            with peer_list_lock: peers = sorted(known_peers.values(), key=lambda x: x.get('name', 'z'))
-            if peers: [print(f"  - {p.get('name','?')} ({p.get('ip','?')}:{p.get('p2p_port','?')})") for p in peers]
-            else: print("  (No other peers known)")
+            
+            msg = {
+                'type': 'list',
+                'peer_id': f"user_{MY_P2P_PORT}" if not is_guest else f"guest_{MY_P2P_PORT}"
+            }
+            registry_socket.sendall((json.dumps(msg) + "\n").encode('utf-8'))
+
         elif cmd_lower == '/myinfo': print(f"[YOUR INFO]: {MY_INFO} | Status: {'Guest' if is_guest else f'User (ID: {MY_ID})'}")
         elif cmd_lower.startswith('/msg '):
              parts = cmd.split(' ', 2);
@@ -617,13 +668,13 @@ def start_p2p_client():
              try: registry_socket.sendall((json.dumps({'type': 'request_channel_list'}) + "\n").encode('utf-8'))
              except Exception as e: print(f"[ERROR] Sending request: {e}")
         elif cmd_lower == '/my_channels': # List channels this client is in (local)
-             print("[YOUR CHANNELS]:");
-             with my_channels_lock: channels = sorted(my_channels.items())
-             if channels:
-                 for name, data in channels:
-                     role = "Owner" if data.get('owner') == MY_NAME else "Member"; count = len(data.get('members', {})) if role=="Owner" else "?"; owner=data.get('owner','?')
-                     print(f"  - {name} ({role}, Owner: {owner}, {count} members)")
-             else: print("  (Not in any channels)")
+            print("[YOUR CHANNELS]:")
+            with my_channels_lock: channels = sorted(my_channels.items())
+            if channels:
+                for name, data in channels:
+                    role = "Owner" if data.get('owner') == MY_NAME else "Member"; count = len(data.get('members', {})) if role=="Owner" else "?"; owner=data.get('owner','?')
+                    print(f"  - {name} ({role}, Owner: {owner}, {count} members)")
+            else: print("  (Not in any channels)")
         elif cmd_lower.startswith('/members '): # List members if owner (local)
              parts = cmd.split(' ', 1); name = parts[1].strip() if len(parts)==2 else None
              if name:
