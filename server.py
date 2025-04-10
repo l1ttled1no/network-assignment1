@@ -17,7 +17,7 @@ peer_lock = threading.Lock()
 logged_in_peers = {}
 # Store guest users: { peer_id: {'socket': s, 'addr': a, 'p2p_port': p, 'name': n, 'guest': True} }
 guest_peers = {}
-# Store registered channels: { channel_name: {'owner_id': pid, 'owner_name': n, ...} }
+# Store registered channels: { channel_name: {'owner_id': pid, 'owner_name': n, ...} {'timestamp': iso_ts, 'sender':name','content:msg'}}
 channel_lock = threading.Lock()
 registered_channels = {}
 
@@ -517,6 +517,28 @@ def handle_client(client_socket, client_address):
                                         if p != pid and not info.get('is_invisible', False) and not info.get('is_offline', False)
                                     }
                                     send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
+
+                        # --- Receive and store message from channel members ---
+                        elif msg_type == 'forward_to_owner':
+                            channel_name = message.get('channel_name')
+                            sender_name = message.get('original_sender')
+                            msg_content = message.get('content')
+                            timestamp = message.get('timestamp')
+                            with channel_lock:
+                                channel_data = registered_channels[channel_name]
+                                message_log = channel_data.setdefault('messages', [])
+
+                                # Create the log entry dictionary
+                                log_entry = {
+                                    'sender': sender_name,
+                                    'content': msg_content,
+                                    'timestamp': timestamp
+                                }
+
+                                # Append the new message to the log
+                                message_log.append(log_entry)
+
+                                print(f"[REGISTRY LOG] Stored message for channel '{channel_name}' from '{sender_name}'. Log size: {len(message_log)}")
 
                         # --- Handle other message types ---
                         # Add handlers for /join, /leave, /ch_msg etc. later
