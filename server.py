@@ -519,11 +519,14 @@ def handle_client(client_socket, client_address):
                                     send_message_to_peer(pid, {'type': 'peer_list', 'peers': peers_for_client})
 
                         # --- Receive and store message from channel members ---
-                        elif msg_type == 'forward_to_owner':
+                        elif msg_type == 'forward_to_owner' or msg_type == 'channel_message':
                             channel_name = message.get('channel_name')
-                            sender_name = message.get('original_sender')
+                            sender_name = message.get('sender')
                             msg_content = message.get('content')
                             timestamp = message.get('timestamp')
+
+                            #  Add more logic here, if channel_message then store is enough
+                            #  But if forward_to_owner, then have to broadcast to peers
                             with channel_lock:
                                 channel_data = registered_channels[channel_name]
                                 message_log = channel_data.setdefault('messages', [])
@@ -539,7 +542,61 @@ def handle_client(client_socket, client_address):
                                 message_log.append(log_entry)
 
                                 print(f"[REGISTRY LOG] Stored message for channel '{channel_name}' from '{sender_name}'. Log size: {len(message_log)}")
+                                print(f"[REGISTRY LOG] Message content: {msg_content}")
+                            # Broad cast the message to the peers in that channel
+                            if msg_type == 'forward_to_owner':
+                                broadcast_update(
+                                    {'type': 'notify_new_msg',
+                                     'channel_name': channel_name,
+                                     'sender': sender_name,
+                                     'content': msg_content,
+                                     'timestamp': timestamp
+                                    }, exclude_peer_id=peer_id)
+                                    
 
+                        elif msg_type == 'synchronization':
+                            msg_channel = message.get('channel_name')
+                            msg_content = message.get('content')
+                            msg_timestamp = message.get('timestamp')
+
+                            message_to_send = []
+                            found_index = -1
+                            print(f"[SYNC] Received synchronization request")
+                            with channel_lock:
+                                channel_data = registered_channels[msg_channel]
+                                message_list = channel_data.get('messages')
+                                for index, message_in_log in enumerate(message_list):
+                                    if message_in_log.get('timestamp') == msg_timestamp:
+                                        found_index = index
+                                        break
+
+                                if found_index != -1:
+                                    # Found the message
+                                    message_to_send = message_list[found_index+1:]
+                                else:
+                                    print(f"[REGISTRY SYNC] Message with timestamp {msg_timestamp} not found in channel '{msg_channel}'.")
+                            # Look for the msg with that timestamp on the tracker
+                            
+                            if found_index != -1:
+                                reply_message = {
+                                    'type': 'sync_reply',
+                                    'channel_name': msg_channel,
+                                    'status': 'sync_point_found',
+                                    'requested_timestamp': msg_timestamp,
+                                    'messages': message_to_send
+                                } 
+                                print (f"[REGISTRY SYNC] Success, sending {message_list}")
+                            else:
+                                reply_message = {
+                                    'type': 'sync_reply',
+                                    'channel_name': msg_channel,
+                                    'status': 'sync_point_not_found',
+                                    'requested_timestamp': msg_timestamp,
+                                    'messages': []
+                                }
+                                print (f"[REGISTRY SYNC] Not success, no messages found")
+                            
+                            send_message_to_peer(peer_id, reply_message)
                         # --- Handle other message types ---
                         # Add handlers for /join, /leave, /ch_msg etc. later
                         else:
