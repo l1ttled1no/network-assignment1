@@ -260,7 +260,7 @@ def handle_peer_connection(peer_socket, peer_address):
                                 threading.Thread(target=send_p2p_message,
                                                  args=(req_name, json.dumps(accept_response) + '\n'),
                                                  daemon=True).start()
-                                gui_log(f"P2P >>] Sent join acceptance for '{req_channel}' to '{req_name}'.")
+                                print(f"P2P >>] Sent join acceptance for '{req_channel}' to '{req_name}'.")
                                 # Notify GUI to update channel/member lists
                                 gui_queue.put(("UPDATE_MY_CHANNELS", my_channels.copy()))
 
@@ -402,13 +402,13 @@ def handle_peer_connection(peer_socket, peer_address):
                                                      args=(member_name, forward_json),
                                                      daemon=True).start()
                                     send_count += 1
-                            gui_log(f"P2P >>] Forwarded message from '{original_sender}' to {send_count} members of '{channel}'.")
+                            print(f"P2P >>] Forwarded message from '{original_sender}' to {send_count} members of '{channel}'.")
 
                             # 5. Send to registry for storage/potential offline delivery
                             if registry_socket and not is_offline:
                                 try:
                                     registry_socket.sendall(forward_json.encode('utf-8')) # Note: using forward_json here
-                                    gui_log(f"P2P >>] Sent forwarded message for '{channel}' to registry.")
+                                    print(f"P2P >>] Sent forwarded message for '{channel}' to registry.")
                                 except (socket.error, OSError) as e:
                                     gui_log(f"P2P ERROR] Failed to send forwarded message to registry: {e}", level="ERROR")
                             else:
@@ -869,7 +869,7 @@ def send_p2p_message(target_name, message_json_with_newline):
     # 4. Get IP and Port from the found target_info
     ip, port = target_info.get('ip'), target_info.get('p2p_port')
     if not ip or not port:
-        gui_log(f"P2P SEND ERROR] Peer '{target_name}' has incomplete info (IP/Port missing).", level="ERROR")
+        print(f"P2P SEND ERROR] Peer '{target_name}' has incomplete info (IP/Port missing).", level="ERROR")
         return False
 
     # 5. Attempt P2P connection and send
@@ -878,7 +878,7 @@ def send_p2p_message(target_name, message_json_with_newline):
     try:
         if found_in_registry:
             # print("Why it doesn;t come heere?")
-            gui_log(f"P2P SEND >>] Attempting P2P to '{target_name}' at {ip}:{port}")
+            print(f"P2P SEND >>] Attempting P2P to '{target_name}' at {ip}:{port}")
 
             p2p_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             p2p_send_socket.settimeout(5.0) # Connection timeout
