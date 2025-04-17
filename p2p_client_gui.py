@@ -850,11 +850,16 @@ def send_p2p_message(target_name, message_json_with_newline):
     with peer_list_lock: # Need lock to safely access known_peers
         # Iterate through known_peers (populated by registry) to find by name
         for peer_id, registry_info in known_peers.items():
+            # print(target_name)
+            # print(registry_info.get('name'))
             if registry_info.get('name') == target_name:
+                # print("Check if come here?")
                 found_in_registry = True
                 # Check the offline status specifically from the registry data
                 target_is_offline_in_registry = registry_info.get('is_offline', False)
                 break # Found the peer in the registry, no need to check further
+
+    # print(known_peers)
 
     # 4. If found in registry and marked offline, stop the send attempt
     if found_in_registry and target_is_offline_in_registry:
@@ -869,8 +874,10 @@ def send_p2p_message(target_name, message_json_with_newline):
 
     # 5. Attempt P2P connection and send
     p2p_send_socket = None
+    # print (found_in_registry)
     try:
         if found_in_registry:
+            # print("Why it doesn;t come heere?")
             gui_log(f"P2P SEND >>] Attempting P2P to '{target_name}' at {ip}:{port}")
 
             p2p_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1090,15 +1097,23 @@ def send_channel_msg(channel_name, msg_content, reg_socket):
         # 2. Display own message immediately (already done by P2P handler loopback? Maybe not needed here)
         # Let's rely on the P2P handler seeing the loopback or the registry notification.
         # If loopback P2P fails, registry 'notify_new_msg' should cover it.
+        try:
+            ts_obj = datetime.datetime.fromisoformat(timestamp_iso.replace('Z', '+00:00'))
+            local_ts = ts_obj.astimezone()
+            time_str = local_ts.strftime('%H:%M:%S')
+        except (ValueError, TypeError):
+            time_str = "time?"
+        formatted_msg = f"[{channel_name} @ {time_str}] {MY_NAME}: {msg_content}"
+        gui_queue.put(("CHANNEL_MSG", channel_name, formatted_msg))
 
         # 3. Broadcast P2P to all members (including self for loopback confirmation if listener works)
         send_count = 0
         for member_name in members_dict:
             # Should owner send to self via P2P? If P2P listener handles it right, yes.
             # If not, rely on registry notification. Let's send to self too for robustness.
-             # if member_name != MY_NAME: # Optionally skip self
-            threading.Thread(target=send_p2p_message, args=(member_name, message_json), daemon=True).start()
-            send_count += 1
+            if member_name != MY_NAME: # Optionally skip self
+                threading.Thread(target=send_p2p_message, args=(member_name, message_json), daemon=True).start()
+                send_count += 1
         gui_log(f"MSG SENT] Broadcast attempt to {send_count} members of '{channel_name}'.")
 
         # 4. Send to registry for storage/history/offline delivery
