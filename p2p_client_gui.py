@@ -331,12 +331,13 @@ def handle_peer_connection(peer_socket, peer_address):
                                 # Format message for GUI display
                                 formatted_msg = f"[{channel} @ {time_str}] {display_sender}: {content}"
                                 gui_queue.put(("CHANNEL_MSG", channel, formatted_msg))
+                                gui_queue.put(("NEW_MESSAGE_NOTICE", channel))
 
                             else:
                                 # Received a message for a channel we're not in (shouldn't happen if logic is correct)
-                                 gui_log(f"P2P WARNING] Received message for channel '{channel}' but not a member. Ignoring.", level="WARN")
+                                gui_log(f"P2P WARNING] Received message for channel '{channel}' but not a member. Ignoring.", level="WARN")
                         else:
-                             gui_log(f"P2P WARNING] Received incomplete channel message from {actual_peer_name}", level="WARN")
+                            gui_log(f"P2P WARNING] Received incomplete channel message from {actual_peer_name}", level="WARN")
 
 
                     # --- Forward Request (Received by Owner) ---
@@ -381,6 +382,7 @@ def handle_peer_connection(peer_socket, peer_address):
                                 time_str = "time?"
                             formatted_msg = f"[{channel} @ {time_str}] {original_sender}: {msg_content}"
                             gui_queue.put(("CHANNEL_MSG", channel, formatted_msg))
+                            gui_queue.put(("NEW_MESSAGE_NOTICE",channel))
 
                             # 3. Prepare the message for broadcasting to other members
                             forward_payload = {
@@ -408,7 +410,7 @@ def handle_peer_connection(peer_socket, peer_address):
                                     registry_socket.sendall(forward_json.encode('utf-8')) # Note: using forward_json here
                                     gui_log(f"P2P >>] Sent forwarded message for '{channel}' to registry.")
                                 except (socket.error, OSError) as e:
-                                     gui_log(f"P2P ERROR] Failed to send forwarded message to registry: {e}", level="ERROR")
+                                    gui_log(f"P2P ERROR] Failed to send forwarded message to registry: {e}", level="ERROR")
                             else:
                                  gui_log(f"P2P INFO] Not sending forwarded message to registry (offline or no socket).")
 
@@ -845,20 +847,20 @@ def send_p2p_message(target_name, message_json_with_newline):
     # 3. Check target's offline status *if available in known_peers*
     target_is_offline_in_registry = False
     found_in_registry = False
-    target_registry_info = None
-    with peer_list_lock:
+    with peer_list_lock: # Need lock to safely access known_peers
+        # Iterate through known_peers (populated by registry) to find by name
         for peer_id, registry_info in known_peers.items():
             if registry_info.get('name') == target_name:
                 found_in_registry = True
-                target_registry_info = registry_info # Keep for logging
+                # Check the offline status specifically from the registry data
                 target_is_offline_in_registry = registry_info.get('is_offline', False)
-                break
+                break # Found the peer in the registry, no need to check further
 
+    # 4. If found in registry and marked offline, stop the send attempt
     if found_in_registry and target_is_offline_in_registry:
-        gui_log(f"P2P SEND INFO] Cannot send to '{target_name}': Peer reported as offline by registry.", level="INFO")
-        # Consider queuing or alternative? For now, just fail.
-        return False
-
+        print(f"[P2P SEND INFO] Cannot send to '{target_name}': Peer is reported as offline by the registry in 'known_peers'.")
+        return False # Message not sent
+    
     # 4. Get IP and Port from the found target_info
     ip, port = target_info.get('ip'), target_info.get('p2p_port')
     if not ip or not port:
@@ -868,15 +870,18 @@ def send_p2p_message(target_name, message_json_with_newline):
     # 5. Attempt P2P connection and send
     p2p_send_socket = None
     try:
-        status_msg = "(Registry: Online)" if found_in_registry else "(Registry status unknown)"
-        gui_log(f"P2P SEND >>] Attempting P2P to '{target_name}' {status_msg} at {ip}:{port}")
+        if found_in_registry:
+            gui_log(f"P2P SEND >>] Attempting P2P to '{target_name}' at {ip}:{port}")
 
-        p2p_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        p2p_send_socket.settimeout(5.0) # Connection timeout
-        p2p_send_socket.connect((ip, port))
-        p2p_send_socket.sendall(message_json_with_newline.encode('utf-8'))
-        # gui_log(f"[P2P SEND OK] Message sent successfully to '{target_name}'.") # Maybe too verbose
-        return True
+            p2p_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            p2p_send_socket.settimeout(5.0) # Connection timeout
+            p2p_send_socket.connect((ip, port))
+            p2p_send_socket.sendall(message_json_with_newline.encode('utf-8'))
+            # gui_log(f"[P2P SEND OK] Message sent successfully to '{target_name}'.") # Maybe too verbose
+            return True
+        else:
+            print(f"[P2P SEND >>] Message sent unsuccessfully, host is offline")
+            return False
 
     except socket.timeout:
         gui_log(f"P2P SEND ERROR] Connection to '{target_name}' ({ip}:{port}) timed out.", level="ERROR")
@@ -1565,43 +1570,43 @@ def attempt_reconnect_and_register(host, port):
         temp_socket.settimeout(20.0) # Ack timeout
 
         while not ack_received:
-             try:
-                 data = temp_socket.recv(BUFFER_SIZE)
-                 if not data:
-                     final_message = "Connection closed by server during reconnect ack."
-                     ack_received = True; break
-                 buffer += data.decode('utf-8')
-                 if '\n' in buffer:
-                     resp_json, buffer = buffer.split('\n', 1)
-                     response = json.loads(resp_json)
-                     r_type = response.get('type')
-                     ack_received = True
+            try:
+                data = temp_socket.recv(BUFFER_SIZE)
+                if not data:
+                    final_message = "Connection closed by server during reconnect ack."
+                    ack_received = True; break
+                buffer += data.decode('utf-8')
+                if '\n' in buffer:
+                    resp_json, buffer = buffer.split('\n', 1)
+                    response = json.loads(resp_json)
+                    r_type = response.get('type')
+                    ack_received = True
 
-                     if r_type == 'login_ack' or r_type == 'guest_ack':
-                         final_message = response.get('message', "Reconnection successful!")
-                         success = True
-                         server_ip = response.get('client_ip')
-                         if server_ip:
-                             update_my_info(name, MY_P2P_PORT, ip=server_ip)
-                         # Assign the new socket
-                         registry_socket = temp_socket
-                         registry_socket.settimeout(None) # Ready for listener
-                         return True, final_message, registry_socket
-                     elif r_type == 'error':
-                         final_message = f"Reconnect failed: {response.get('message', 'Server error')}"
-                         success = False; break # Exit loop on error
-                     else:
-                         final_message = f"Unexpected ack type during reconnect: {r_type}"
-                         success = False; break
-             except socket.timeout:
-                 final_message = "Timeout waiting for reconnect acknowledgement."
-                 ack_received = True; break
-             except (socket.error, json.JSONDecodeError, UnicodeDecodeError) as e:
-                 final_message = f"Error reading/decoding reconnect ack: {e}"
-                 ack_received = True; break
-             except Exception as e:
-                 final_message = f"Unexpected error during reconnect ack: {e}"
-                 ack_received = True; break
+                    if r_type == 'login_ack' or r_type == 'guest_ack':
+                        final_message = response.get('message', "Reconnection successful!")
+                        success = True
+                        server_ip = response.get('client_ip')
+                        if server_ip:
+                            update_my_info(name, MY_P2P_PORT, ip=server_ip)
+                        # Assign the new socket
+                        registry_socket = temp_socket
+                        registry_socket.settimeout(None) # Ready for listener
+                        return True, final_message, registry_socket
+                    elif r_type == 'error':
+                        final_message = f"Reconnect failed: {response.get('message', 'Server error')}"
+                        success = False; break # Exit loop on error
+                    else:
+                        final_message = f"Unexpected ack type during reconnect: {r_type}"
+                        success = False; break
+            except socket.timeout:
+                final_message = "Timeout waiting for reconnect acknowledgement."
+                ack_received = True; break
+            except (socket.error, json.JSONDecodeError, UnicodeDecodeError) as e:
+                final_message = f"Error reading/decoding reconnect ack: {e}"
+                ack_received = True; break
+            except Exception as e:
+                final_message = f"Unexpected error during reconnect ack: {e}"
+                ack_received = True; break
 
         # Cleanup if loop finished without success
         if temp_socket:
@@ -1644,7 +1649,7 @@ class P2PClientGUI(tk.Tk):
         self.current_channel = None # Track selected channel for messaging
         # *** NEW: Dictionary to store messages per channel for display ***
         self.channel_display_buffers = {} # {channel_name: [formatted_msg1, ...]}
-
+        self.channel_notification_state  = {} # {channel_name: bool}
         # GUI Elements
         self._create_widgets() # Creates chat_area among others
 
@@ -1755,27 +1760,48 @@ class P2PClientGUI(tk.Tk):
 
     def _set_ui_state(self, logged_in, online):
         """Enable/disable UI elements based on login and online status."""
-        state = tk.NORMAL if (logged_in and online) else tk.DISABLED
-        offline_state = tk.NORMAL if logged_in else tk.DISABLED # Some buttons enabled when offline
+        # State for elements requiring online connection
+        online_state = tk.NORMAL if (logged_in and online) else tk.DISABLED
+        # State for elements requiring only login (can be done offline)
+        logged_in_state = tk.NORMAL if logged_in else tk.DISABLED
 
-        self.input_entry.config(state=tk.NORMAL if (logged_in and online and self.current_channel) else tk.DISABLED)
-        self.send_button.config(state=tk.NORMAL if (logged_in and online and self.current_channel) else tk.DISABLED)
+        # *** Input and Send Button: Require logged_in AND a selected channel ***
+        # *** Now allows sending when offline ***
+        can_type = logged_in and self.current_channel is not None
+        self.input_entry.config(state=tk.NORMAL if can_type else tk.DISABLED)
+        self.send_button.config(state=tk.NORMAL if can_type else tk.DISABLED)
 
-        self.list_peers_button.config(state=state)
-        self.list_channels_button.config(state=state)
-        self.create_channel_button.config(state=state)
-        self.join_channel_button.config(state=state)
-        self.visibility_button.config(state=offline_state) # Can toggle visibility anytime after login
+        # Buttons requiring online connection (remain the same)
+        self.list_peers_button.config(state=online_state)
+        self.list_channels_button.config(state=online_state)
+        self.create_channel_button.config(state=online_state)
+        self.join_channel_button.config(state=online_state)
 
-        # Online/Offline button logic
-        self.online_offline_button.config(state=offline_state) # Enabled once logged in
+        # Buttons requiring only login (remain the same)
+        self.visibility_button.config(state=logged_in_state)
+        self.online_offline_button.config(state=logged_in_state)
+
+        # Configure Online/Offline button text (remains the same)
         self.online_offline_button.config(text="Go Offline" if online else "Go Online")
 
-        # Listboxes - maybe clear them when offline? Or just leave as is?
+        # Clear lists when going offline (remains the same)
         if not online:
-             self.peer_listbox.delete(0, tk.END)
-             # Keep my channels, clear available?
-             self.avail_channels_listbox.delete(0, tk.END)
+            self.peer_listbox.delete(0, tk.END)
+            self.peer_listbox.insert(tk.END, "(Offline)")
+            self.avail_channels_listbox.delete(0, tk.END)
+            self.avail_channels_listbox.insert(tk.END, "(Offline)")
+             # Keep 'My Channels' listbox populated
+
+        # Ensure input is disabled if no channel selected, even if logged in
+        if not self.current_channel:
+            self.input_entry.config(state=tk.DISABLED)
+            self.send_button.config(state=tk.DISABLED)
+
+        # Set focus if possible
+        if can_type and not online: # If offline but can type, focus input
+            self.input_entry.focus_set()
+        elif can_type and online: # If online and can type, focus input
+            self.input_entry.focus_set()
 
 
     def _show_login_dialog(self):
@@ -1970,6 +1996,11 @@ class P2PClientGUI(tk.Tk):
                         # This function now handles buffering and conditional display
                         self._display_channel_message(channel, formatted_msg)
 
+                    # --- Handle new message notification ---
+                    elif msg_type == "NEW_MESSAGE_NOTICE":
+                        channel_name = item[1]
+                        self._trigger_notification_update(channel_name)
+
                     # --- Other tuple handlers remain the same ---
                     elif msg_type == "UPDATE_PEERS":
                         peers_data = item[1]
@@ -1981,14 +2012,14 @@ class P2PClientGUI(tk.Tk):
                         self._update_my_channels_list(my_channels_data)
                         # Check if current channel is still valid
                         if self.current_channel and self.current_channel not in my_channels_data:
-                             self.log_message(f"You are no longer in channel '{self.current_channel}'.", level="WARN")
-                             self.current_channel = None
-                             self.chat_area.config(state='normal')
-                             self.chat_area.delete('1.0', tk.END)
-                             self.chat_area.insert(tk.END, "Select a channel from 'My Channels'.\n", "SYSTEM")
-                             self.chat_area.config(state='disabled')
-                             self._set_ui_state(logged_in=True, online=(not is_offline)) # Update button states
-                             self._update_status_bar()
+                            self.log_message(f"You are no longer in channel '{self.current_channel}'.", level="WARN")
+                            self.current_channel = None
+                            self.chat_area.config(state='normal')
+                            self.chat_area.delete('1.0', tk.END)
+                            self.chat_area.insert(tk.END, "Select a channel from 'My Channels'.\n", "SYSTEM")
+                            self.chat_area.config(state='disabled')
+                            self._set_ui_state(logged_in=True, online=(not is_offline)) # Update button states
+                            self._update_status_bar()
 
 
                     elif msg_type == "UPDATE_AVAILABLE_CHANNELS":
@@ -2043,6 +2074,7 @@ class P2PClientGUI(tk.Tk):
         # Reschedule the check
         self.after(100, self._process_gui_queue)
 
+    
 
     def log_message(self, msg, level="INFO"):
         """Appends a message to the chat area with appropriate tag."""
@@ -2061,6 +2093,25 @@ class P2PClientGUI(tk.Tk):
         except Exception as e:
             print(f"Error displaying log message in GUI: {e}") # Fallback
 
+    def _trigger_notification_update(self, channel_name):
+        """Sets notification state if channel is not active and redraws list."""
+        # Don't notify if user is already looking at the channel
+        if channel_name == self.current_channel:
+            return
+
+        # Don't notify if user is not currently in the channel anymore
+        with my_channels_lock:
+            if channel_name not in my_channels:
+                return
+
+        # Set the notification state
+        self.channel_notification_state[channel_name] = True
+
+        # Redraw the 'My Channels' list to show the indicator
+        # We call the existing update function which now reads the state
+        with my_channels_lock: # Get current channels to pass to update function
+            current_my_channels = my_channels.copy()
+        self._update_my_channels_list(current_my_channels)
 
     def _display_channel_message(self, channel, formatted_msg):
          """Buffers channel messages and displays only if channel is active."""
@@ -2119,41 +2170,81 @@ class P2PClientGUI(tk.Tk):
             self.peer_listbox.insert(tk.END, entry)
 
 
+    # --- Modified _update_my_channels_list with itemconfig for color ---
     def _update_my_channels_list(self, my_channels_data):
-        """Updates the 'My Channels' listbox."""
+        """Updates the 'My Channels' listbox, adding notification markers and color."""
         current_selection = self.my_channels_listbox.curselection()
         selected_channel = None
         if current_selection:
-             try:
-                 selected_index = current_selection[0]
-                 selected_text = self.my_channels_listbox.get(selected_index)
-                 # Extract channel name (assuming format "Name (Owner/Member)")
-                 selected_channel = selected_text.split(" (")[0]
-             except Exception:
-                 selected_channel = None
+            try:
+                selected_index = current_selection[0]
+                # *** Get text and strip marker before extracting name ***
+                selected_text = self.my_channels_listbox.get(selected_index).lstrip("* ")
+                selected_channel = selected_text.split(" (")[0]
+            except Exception as e:
+                print(f"[WARN] Error getting selected channel name during update: {e}")
+                selected_channel = None
 
+        # Store scroll position before clearing
+        scroll_pos = self.my_channels_listbox.yview()
 
+        # Clear the listbox before rebuilding
         self.my_channels_listbox.delete(0, tk.END)
+
         sorted_channels = sorted(my_channels_data.items())
         new_selection_index = -1
-        idx = 0
+        idx = 0 # Keep track of the index for itemconfig
+
+        # Define colors
+        default_fg_color = 'black' # Or query system default if needed
+        notification_fg_color = 'red'
+
         for name, data in sorted_channels:
             role = "Owner" if data.get('owner') == MY_NAME else "Member"
             owner_display = f" (Owner: {data.get('owner', '?')})" if role == "Member" else ""
             member_count = len(data.get('members', {}))
             count_display = f", {member_count} members" if role == "Owner" else ""
-            entry = f"{name} ({role}{count_display})"
-            self.my_channels_listbox.insert(tk.END, entry)
+
+            # Check notification state
+            has_notification = self.channel_notification_state.get(name, False)
+            notification_marker = "* " if has_notification else ""
+
+            # Construct the entry text
+            entry_text = f"{notification_marker}{name}"
+            if role == "Member":
+                 entry_text += owner_display # Append owner only for members
+
+            # Insert the item text using the current index
+            self.my_channels_listbox.insert(idx, entry_text)
+
+            # *** Configure foreground color based on notification state ***
+            item_color = notification_fg_color if has_notification else default_fg_color
+            self.my_channels_listbox.itemconfig(idx, {'foreground': item_color})
+            # Optionally, configure font weight here too if desired
+            # item_weight = 'bold' if has_notification else 'normal'
+            # self.my_channels_listbox.itemconfig(idx, {'foreground': item_color, 'font': (self.default_font.actual()['family'], self.default_font.actual()['size'], item_weight)})
+
+            # Check if this item should be re-selected
             if name == selected_channel:
                  new_selection_index = idx
-            idx += 1
+
+            idx += 1 # Increment index for the next item
 
         # Re-select previously selected channel if still present
         if new_selection_index != -1:
-            self.my_channels_listbox.selection_set(new_selection_index)
-            self.my_channels_listbox.activate(new_selection_index)
-            # Trigger the selection logic again if needed
-            self._on_my_channel_select(None) # Pass None as event
+            try:
+                self.my_channels_listbox.selection_set(new_selection_index)
+                self.my_channels_listbox.activate(new_selection_index)
+                # Optional: Ensure the selection is visible
+                # self.my_channels_listbox.see(new_selection_index)
+            except tk.TclError as e:
+                 # Handle potential errors if index is invalid after update (shouldn't happen often)
+                 print(f"[WARN] Error re-selecting item at index {new_selection_index}: {e}")
+
+
+        # Restore scroll position
+        self.my_channels_listbox.yview_moveto(scroll_pos[0])
+
 
 
 
@@ -2173,70 +2264,108 @@ class P2PClientGUI(tk.Tk):
 
 
     # --- Modify _on_my_channel_select ---
+    # --- Corrected _on_my_channel_select ---
     def _on_my_channel_select(self, event):
-         """Handles selection change in 'My Channels'. Clears and loads chat."""
+         """Handles selection change. Clears notification and loads chat."""
          selection = self.my_channels_listbox.curselection()
          if not selection:
-             # No channel selected or selection cleared
-             if self.current_channel is not None: # Only clear if previously selected
+             # Handling for no selection (or deselection)
+             if self.current_channel is not None: # Only update if a channel was previously selected
                  self.current_channel = None
                  self.chat_area.config(state='normal')
                  self.chat_area.delete('1.0', tk.END)
                  self.chat_area.insert(tk.END, "Select a channel from 'My Channels'.\n", "SYSTEM")
                  self.chat_area.config(state='disabled')
-                 self.input_entry.config(state=tk.DISABLED)
+                 self.input_entry.config(state=tk.DISABLED) # Ensure input disabled
                  self.send_button.config(state=tk.DISABLED)
                  self._update_status_bar()
              return
 
          try:
              index = selection[0]
-             list_text = self.my_channels_listbox.get(index)
+             list_text_with_marker = self.my_channels_listbox.get(index)
+             # Remove potential marker before extracting name
+             list_text = list_text_with_marker.lstrip("* ")
              new_channel_name = list_text.split(" (")[0] # Extract channel name
 
-             if new_channel_name and new_channel_name != self.current_channel:
+             if not new_channel_name: # Safety check if extraction failed
+                 print("[ERROR] Failed to extract channel name from list selection.")
+                 return
+
+             # *** Check and clear notification state for the selected channel ***
+             notification_cleared = False
+             if new_channel_name in self.channel_notification_state:
+                 # Use pop to remove the key and check if it existed (True if removed, None otherwise)
+                 if self.channel_notification_state.pop(new_channel_name, None):
+                     notification_cleared = True
+                     print(f"[DEBUG] Cleared notification for {new_channel_name}")
+
+             # Determine if the view needs updating
+             # Update if: channel changed OR notification was just cleared (to redraw list or load chat)
+             update_needed = (new_channel_name != self.current_channel) or notification_cleared
+
+             if update_needed:
+                 # Check if the channel *actually* changed (for reloading chat content)
+                 channel_actually_changed = (new_channel_name != self.current_channel)
+
+                 # Update the current channel tracker
                  self.current_channel = new_channel_name
-                 # self.log_message(f"Switched to channel: {self.current_channel}", level="SYSTEM") # Log switch
-                 print(f"Switched to channel: {self.current_channel}") # Console log is less intrusive
 
-                 # Clear the chat area
-                 self.chat_area.config(state='normal')
-                 self.chat_area.delete('1.0', tk.END)
+                 # --- Reload chat content ONLY if the channel actually changed ---
+                 if channel_actually_changed:
+                    print(f"Switched to channel: {self.current_channel}") # Console log
+                    # Clear the chat area
+                    self.chat_area.config(state='normal')
+                    self.chat_area.delete('1.0', tk.END)
+                    # Load messages from the buffer for this channel
+                    messages_to_display = self.channel_display_buffers.get(self.current_channel, [])
+                    if not messages_to_display:
+                        self.chat_area.insert(tk.END, f"Message history for '{self.current_channel}' (This session).\n", "SYSTEM")
+                    else:
+                        for msg in messages_to_display:
+                            tag = "CHANNEL_MSG"
+                            # Detect self message
+                            if f"] {MY_NAME} " in msg and (msg.strip().endswith(":") or f"] {MY_NAME} (You):" in msg or f"] {MY_NAME} (Offline Queued):" in msg) :
+                                tag = "SELF_MSG"
+                            # Ensure newline before inserting
+                            if not msg.endswith('\n'): msg += '\n'
+                            self.chat_area.insert(tk.END, msg, tag)
+                    self.chat_area.config(state='disabled')
+                    self.chat_area.see(tk.END) # Scroll to bottom after loading
 
-                 # Load messages from the buffer for this channel
-                 messages_to_display = self.channel_display_buffers.get(self.current_channel, [])
-                 if not messages_to_display:
-                     self.chat_area.insert(tk.END, f"Message history for '{self.current_channel}' (This session).\n", "SYSTEM")
-                 else:
-                     for msg in messages_to_display:
-                         # Determine tag again for historical messages
-                         tag = "CHANNEL_MSG"
-                         if f"] {MY_NAME} " in msg and (msg.strip().endswith(":") or f"] {MY_NAME} (You):" in msg or f"] {MY_NAME} (Offline Queued):" in msg) :
-                             tag = "SELF_MSG"
-                         # Add other tag checks if needed (e.g., for join/part messages stored in buffer)
+                 # --- Update UI state (enable input, set focus) ---
+                 can_type = initial_login_info is not None # Check if logged in
+                 self.input_entry.config(state=tk.NORMAL if can_type else tk.DISABLED)
+                 self.send_button.config(state=tk.NORMAL if can_type else tk.DISABLED)
+                 if can_type: self.input_entry.focus_set() # Set focus if enabled
 
-                         # Ensure newline
-                         if not msg.endswith('\n'):
-                            msg += '\n'
-                         self.chat_area.insert(tk.END, msg, tag)
+                 # --- Redraw channel list ONLY if notification was cleared ---
+                 if notification_cleared:
+                      print(f"[DEBUG] Redrawing channel list after clearing notification for {new_channel_name}")
+                      # Get current channel data safely to pass to update function
+                      with my_channels_lock:
+                          current_my_channels = my_channels.copy()
+                      self._update_my_channels_list(current_my_channels) # This redraws the list
 
-                 self.chat_area.config(state='disabled')
-                 self.chat_area.see(tk.END) # Scroll to bottom after loading
+                 # --- Update status bar ---
+                 self._update_status_bar() # Update status bar reflecting the new current channel
 
-                 # Update UI state (enable input etc.)
-                 self.input_entry.config(state=tk.NORMAL if not is_offline else tk.DISABLED)
-                 self.send_button.config(state=tk.NORMAL if not is_offline else tk.DISABLED)
-                 if not is_offline: self.input_entry.focus_set()
-                 self._update_status_bar()
 
-             elif new_channel_name == self.current_channel:
-                 # Re-selected the same channel, do nothing? Or maybe ensure focus?
-                 if not is_offline: self.input_entry.focus_set()
-                 pass
+             # Case: Re-selected the same channel, and no notification was cleared
+             # (i.e., update_needed was False)
+             elif new_channel_name == self.current_channel and not notification_cleared:
+                 # Just ensure input state is correct and focus is set
+                 # No need to reload chat or redraw list
+                 can_type = initial_login_info is not None
+                 self.input_entry.config(state=tk.NORMAL if can_type else tk.DISABLED)
+                 self.send_button.config(state=tk.NORMAL if can_type else tk.DISABLED)
+                 if can_type: self.input_entry.focus_set()
+                 # No need to update status bar if channel didn't change
 
          except Exception as e:
+             # Log error and reset state
              self.log_message(f"Error selecting channel: {e}", level="ERROR")
-             print(f"Error selecting channel: {e}") # Also print critical errors
+             print(f"CRITICAL Error during channel selection: {e}")
              import traceback
              traceback.print_exc()
              self.current_channel = None
@@ -2293,20 +2422,18 @@ class P2PClientGUI(tk.Tk):
             else: self.log_message(f"Unknown command: {command}", level="ERROR")
 
         # --- Channel Message Sending ---
-        elif self.current_channel:
-            if is_offline:
-                # Queue offline message
-                self.log_message(f"Queueing message for {self.current_channel} (offline)...")
-                send_channel_msg(self.current_channel, input_text, None) # Socket is None
-            else:
-                # Send online message
-                # GUI update will happen via queue (loopback or registry notify)
-                # Run send in thread to avoid blocking GUI on network ops
-                threading.Thread(target=send_channel_msg,
-                                 args=(self.current_channel, input_text, registry_socket),
-                                 daemon=True).start()
-        else:
+        elif self.current_channel and initial_login_info: # Check login status via initial_login_info
+            print(f"[DEBUG] GUI initiating send to {self.current_channel} (Offline: {is_offline})") # Console Debug
+            # Call send_channel_msg - it will handle online/offline logic internally
+            # Run in a thread to avoid blocking GUI, especially for online sends
+            threading.Thread(target=send_channel_msg,
+                             args=(self.current_channel, input_text, registry_socket),
+                             daemon=True).start()
+        elif not self.current_channel:
             self.log_message("Cannot send message: No channel selected.", level="ERROR")
+        elif not initial_login_info:
+             # Should not happen if UI state is managed correctly
+             self.log_message("Cannot send message: Not logged in.", level="ERROR")
 
     def _handle_msg_command(self, args):
         """Handles /msg <channel> <message> command"""
@@ -2546,13 +2673,13 @@ class P2PClientGUI(tk.Tk):
 
         info_str = "Channels you are in:\n---------------------\n"
         with my_channels_lock:
-             sorted_channels = sorted(my_channels.items())
-             for name, data in sorted_channels:
-                 role = "Owner" if data.get('owner') == MY_NAME else "Member"
-                 owner_display = f"(Owner: {data.get('owner', '?')})"
-                 member_count = len(data.get('members', {}))
-                 count_display = f", {member_count} members"
-                 info_str += f"- {name} ({role}{count_display if role=='Owner' else ''}) {owner_display if role=='Member' else ''}\n"
+            sorted_channels = sorted(my_channels.items())
+            for name, data in sorted_channels:
+                role = "Owner" if data.get('owner') == MY_NAME else "Member"
+                owner_display = f"(Owner: {data.get('owner', '?')})"
+                member_count = len(data.get('members', {}))
+                count_display = f", {member_count} members"
+                info_str += f"- {name} ({role}{count_display if role=='Owner' else ''}) {owner_display if role=='Member' else ''}\n"
 
         # Display in a popup or log area? Popup for now.
         # Consider a dedicated window if list gets long.
