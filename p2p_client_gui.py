@@ -13,6 +13,7 @@ import queue # For thread-safe communication with GUI
 
 # --- Existing P2P Logic (Slightly Modified for GUI) ---
 # --- Configuration ---
+# REGISTRY_HOST = '192.168.1.3'
 REGISTRY_HOST = '127.0.0.1'
 REGISTRY_PORT = 9999
 LISTEN_HOST = '0.0.0.0'
