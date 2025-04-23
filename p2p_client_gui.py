@@ -245,9 +245,9 @@ def handle_peer_connection(peer_socket, peer_address):
 
                                 # Add or update member
                                 if req_name not in members_dict:
-                                     gui_log(f"CHANNEL] Adding '{req_name}' to '{req_channel}'.")
+                                    print(f"CHANNEL] Adding '{req_name}' to '{req_channel}'.")
                                 else:
-                                     gui_log(f"CHANNEL INFO] '{req_name}' re-requested join to '{req_channel}'. Updating info.")
+                                    print(f"CHANNEL INFO] '{req_name}' re-requested join to '{req_channel}'. Updating info.")
                                 members_dict[req_name] = requester_info
 
                                 # Send acceptance response back P2P in a new thread
@@ -496,6 +496,14 @@ def listen_to_registry(reg_socket, stop_event):
                         gui_log("REGISTRY RECV] Received updated peer list.")
                         with peer_list_lock:
                             known_peers = server_peers
+                        print("[CLIENT] Currently known available peers:")
+                        sorted_peer_list = sorted(known_peers.values(), key=lambda p: p.get('name', 'z').lower())
+                        if sorted_peer_list:
+                            for p_info in sorted_peer_list:
+                                name=p_info.get('name','?'); ip=p_info.get('ip','?'); port=p_info.get('p2p_port','?')
+                                status=p_info.get('login_status','?'); status_str=f"({status})"
+                                print(f"  - {name} {status_str} ({ip}:{port})")
+                        else: print("  (Registry reported no other available peers)")
                         # Send peer list to GUI for display
                         gui_queue.put(("UPDATE_PEERS", known_peers.copy())) # Send a copy
 
@@ -596,6 +604,8 @@ def listen_to_registry(reg_socket, stop_event):
                         channels_data = message.get('channels', {}) # Expect dict {name: info}
                         with available_channels_info_lock:
                             available_channels_info = channels_data # Replace local list
+
+
                         # Update GUI available channels list
                         gui_queue.put(("UPDATE_AVAILABLE_CHANNELS", available_channels_info.copy()))
 
@@ -884,7 +894,7 @@ def send_p2p_message(target_name, message_json_with_newline):
             p2p_send_socket.settimeout(5.0) # Connection timeout
             p2p_send_socket.connect((ip, port))
             p2p_send_socket.sendall(message_json_with_newline.encode('utf-8'))
-            # gui_log(f"[P2P SEND OK] Message sent successfully to '{target_name}'.") # Maybe too verbose
+            print(f"[P2P SEND OK] Message sent successfully to '{target_name}'.") # Maybe too verbose
             return True
         else:
             print(f"[P2P SEND >>] Message sent unsuccessfully, host is offline")
@@ -985,7 +995,7 @@ def join_channel(channel_name_to_join):
         return False
 
     # Cannot join your own channel this way
-    if owner_name == MY_NAME:
+    if owner_name == MY_NAME and owner_port == MY_P2P_PORT:
         gui_log(f"JOIN INFO] You are already the owner of '{channel_name_to_join}'.")
         # Add to my_channels if somehow missing? Should be added on creation.
         return True
@@ -1896,6 +1906,7 @@ class P2PClientGUI(tk.Tk):
         # Use queue to update GUI from this thread
         gui_queue.put(("LOGIN_RESULT", success, message))
         if success:
+            print('Does it come here?')
             # Start listeners only after successful login
             is_offline = False # Go online state
             self._start_network_listeners(sock)
@@ -2175,13 +2186,14 @@ class P2PClientGUI(tk.Tk):
             name = p_info.get('name', '?')
             p_ip = p_info.get('ip', '?')
             p_port = p_info.get('p2p_port', '?')
+            p_status = p_info.get('login_status','?')
             # Omit self from list
-            if name == MY_NAME: continue
+            if name == MY_NAME and p_port == MY_P2P_PORT: continue
             # Omit invisible peers
             if p_info.get('is_invisible', False): continue
 
             offline_status = "(Offline)" if p_info.get('is_offline', False) else ""
-            entry = f"{name} {offline_status}" # ({p_ip}:{p_port})" # Keep it simple
+            entry = f"{name} ({p_status}_{p_port})" # ({p_ip}:{p_port})" # Keep it simple
             self.peer_listbox.insert(tk.END, entry)
 
 
