@@ -13,6 +13,7 @@ import queue # For thread-safe communication with GUI
 
 # --- Existing P2P Logic (Slightly Modified for GUI) ---
 # --- Configuration ---
+# REGISTRY_HOST = '192.168.1.3'
 REGISTRY_HOST = '127.0.0.1'
 REGISTRY_PORT = 9999
 LISTEN_HOST = '0.0.0.0'
@@ -2294,21 +2295,21 @@ class P2PClientGUI(tk.Tk):
     # --- Corrected _on_my_channel_select ---
     def _on_my_channel_select(self, event):
          """Handles selection change. Clears notification and loads chat."""
-         selection = self.my_channels_listbox.curselection()
-         if not selection:
+        selection = self.my_channels_listbox.curselection()
+        if not selection:
              # Handling for no selection (or deselection)
-             if self.current_channel is not None: # Only update if a channel was previously selected
-                 self.current_channel = None
-                 self.chat_area.config(state='normal')
-                 self.chat_area.delete('1.0', tk.END)
-                 self.chat_area.insert(tk.END, "Select a channel from 'My Channels'.\n", "SYSTEM")
-                 self.chat_area.config(state='disabled')
-                 self.input_entry.config(state=tk.DISABLED) # Ensure input disabled
-                 self.send_button.config(state=tk.DISABLED)
-                 self._update_status_bar()
-             return
+            if self.current_channel is not None: # Only update if a channel was previously selected
+                self.current_channel = None
+                self.chat_area.config(state='normal')
+                self.chat_area.delete('1.0', tk.END)
+                self.chat_area.insert(tk.END, "Select a channel from 'My Channels'.\n", "SYSTEM")
+                self.chat_area.config(state='disabled')
+                self.input_entry.config(state=tk.DISABLED) # Ensure input disabled
+                self.send_button.config(state=tk.DISABLED)
+                self._update_status_bar()
+            return
 
-         try:
+        try:
              index = selection[0]
              list_text_with_marker = self.my_channels_listbox.get(index)
              # Remove potential marker before extracting name
